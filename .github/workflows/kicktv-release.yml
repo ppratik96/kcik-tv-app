@@ -27,7 +27,7 @@ jobs:
           fetch-depth: 0
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           java-version: '17'
           distribution: 'temurin'
@@ -59,9 +59,32 @@ jobs:
           gradle assembleRelease --stacktrace 2>&1 | tee gradle-build.log
           BUILD_EXIT=${PIPESTATUS[0]}
           if [ "$BUILD_EXIT" -ne 0 ]; then
-            grep -E '(^e: |FAILURE:|What went wrong|^> |Exception:|Error:)' gradle-build.log | head -n 30 | while IFS= read -r line; do
-              echo "::error title=GradleBuild::${line}"
-            done
+            python3 - << 'PY'
+          import re
+          lines = open("gradle-build.log", errors="replace").read().splitlines()
+          failed_tasks = [l for l in lines if re.match(r"^> Task .* FAILED", l)]
+          compiler_errs = [
+              l for l in lines
+              if l.startswith("e: ") or "AAPT:" in l or ("error:" in l.lower() and not l.strip().startswith("at "))
+          ]
+          what_wrong = []
+          capture = False
+          for l in lines:
+              if l.startswith("FAILURE:") or l.startswith("* What went wrong:"):
+                  capture = True
+              elif l.startswith("* Try:") or l.startswith("* Exception is:"):
+                  capture = False
+              if capture:
+                  what_wrong.append(l)
+          summary = failed_tasks + compiler_errs[:25] + what_wrong[:25]
+          if not summary:
+              summary = lines[-30:]
+          for i in range(0, min(len(summary), 40), 5):
+              chunk = " || ".join(s.strip() for s in summary[i:i+5] if s.strip())
+              chunk = chunk.replace("%", "%25").replace("\r", "").replace("\n", " ")
+              if chunk:
+                  print(f"::error title=GradleFailure::{chunk}")
+          PY
             exit "$BUILD_EXIT"
           fi
 
