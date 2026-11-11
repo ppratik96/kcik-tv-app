@@ -171,23 +171,31 @@
 
     <!-- UI Overlays (Outside playerContainer to ensure full width) -->
     
-    <!-- 1. Premium Info Overlay (Bottom Panel) -->
+    <!-- 1. Premium Info Overlay (Bottom Panel + VOD Seekbar) -->
     <LinearLayout
         android:id="@+id/channelInfoOverlay"
         android:layout_width="match_parent"
-        android:layout_height="160dp"
+        android:layout_height="wrap_content"
+        android:minHeight="160dp"
         android:layout_gravity="bottom"
         android:background="@drawable/gradient_bottom_overlay"
-        android:orientation="horizontal"
+        android:orientation="vertical"
         android:gravity="bottom"
         android:paddingStart="64dp"
         android:paddingEnd="64dp"
-        android:paddingBottom="36dp"
+        android:paddingTop="32dp"
+        android:paddingBottom="32dp"
         android:elevation="5dp"
         android:focusable="false"
         android:focusableInTouchMode="false"
         android:descendantFocusability="blocksDescendants"
         android:visibility="gone">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="bottom">
 
         <!-- Profile Image (Slightly Smaller) -->
         <com.google.android.material.imageview.ShapeableImageView
@@ -361,6 +369,103 @@
                 android:visibility="gone" />
         </LinearLayout>
 
+        </LinearLayout>
+
+        <!-- VOD Transport & Timeline Seekbar (Visible in TV VOD Mode) -->
+        <LinearLayout
+            android:id="@+id/vodTransportContainer"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:layout_marginTop="14dp"
+            android:visibility="gone">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:layout_marginBottom="6dp">
+
+                <TextView
+                    android:id="@+id/vodStateBadge"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="▶ VOD"
+                    android:textColor="@color/black"
+                    android:textSize="11sp"
+                    android:textStyle="bold"
+                    android:background="@drawable/button_primary_background"
+                    android:paddingHorizontal="10dp"
+                    android:paddingVertical="2dp" />
+
+                <TextView
+                    android:id="@+id/vodScrubDeltaBadge"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    tools:text="+00:30"
+                    android:textColor="@color/brand_green"
+                    android:textSize="13sp"
+                    android:textStyle="bold"
+                    android:fontFamily="monospace"
+                    android:layout_marginStart="12dp"
+                    android:visibility="gone" />
+
+                <View
+                    android:layout_width="0dp"
+                    android:layout_height="1dp"
+                    android:layout_weight="1" />
+
+                <TextView
+                    android:id="@+id/vodControlsHint"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="@string/tv_vod_controls_hint"
+                    android:textColor="@color/text_secondary"
+                    android:textSize="11sp" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical">
+
+                <TextView
+                    android:id="@+id/vodPositionText"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="00:00"
+                    android:textColor="@color/white"
+                    android:textSize="13sp"
+                    android:textStyle="bold"
+                    android:fontFamily="monospace" />
+
+                <ProgressBar
+                    android:id="@+id/vodSeekProgressBar"
+                    style="?android:attr/progressBarStyleHorizontal"
+                    android:layout_width="0dp"
+                    android:layout_height="6dp"
+                    android:layout_weight="1"
+                    android:layout_marginHorizontal="14dp"
+                    android:max="1000"
+                    android:progress="0"
+                    android:secondaryProgress="0"
+                    android:progressTint="@color/brand_green"
+                    android:secondaryProgressTint="#55FFFFFF"
+                    android:progressBackgroundTint="#33FFFFFF" />
+
+                <TextView
+                    android:id="@+id/vodDurationText"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="00:00"
+                    android:textColor="@color/text_secondary"
+                    android:textSize="13sp"
+                    android:fontFamily="monospace" />
+            </LinearLayout>
+        </LinearLayout>
+
     </LinearLayout>
 
     <!-- Quality Selection Popup (Context Menu style) -->
@@ -398,11 +503,130 @@
         android:elevation="10dp"
         android:visibility="gone">
 
+        <!-- VODs Button -->
+        <LinearLayout
+            android:id="@+id/btnVodsQuick"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:gravity="center"
+            android:paddingHorizontal="16dp"
+            android:focusable="true"
+            android:focusableInTouchMode="true"
+            android:clickable="true"
+            android:background="@android:color/transparent"
+            android:defaultFocusHighlightEnabled="false">
+
+            <FrameLayout
+                android:layout_width="56dp"
+                android:layout_height="56dp"
+                android:background="@drawable/quick_menu_selection_bg"
+                android:duplicateParentState="true">
+                <ImageView
+                    android:layout_width="28dp"
+                    android:layout_height="28dp"
+                    android:layout_gravity="center"
+                    android:src="@drawable/ic_history"
+                    android:tint="@color/white" />
+            </FrameLayout>
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/tv_quick_vods"
+                android:textColor="@color/white"
+                android:textSize="11sp"
+                android:textStyle="bold"
+                android:layout_marginTop="8dp"
+                android:alpha="0.9" />
+        </LinearLayout>
+
+        <!-- Chat Overlay Style Button -->
+        <LinearLayout
+            android:id="@+id/btnChatOverlayQuick"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="16dp"
+            android:orientation="vertical"
+            android:gravity="center"
+            android:paddingHorizontal="16dp"
+            android:focusable="true"
+            android:focusableInTouchMode="true"
+            android:clickable="true"
+            android:background="@android:color/transparent"
+            android:defaultFocusHighlightEnabled="false">
+
+            <FrameLayout
+                android:layout_width="56dp"
+                android:layout_height="56dp"
+                android:background="@drawable/quick_menu_selection_bg"
+                android:duplicateParentState="true">
+                <ImageView
+                    android:layout_width="28dp"
+                    android:layout_height="28dp"
+                    android:layout_gravity="center"
+                    android:src="@drawable/ic_chat"
+                    android:tint="@color/white" />
+            </FrameLayout>
+
+            <TextView
+                android:id="@+id/txtChatOverlayQuick"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/tv_quick_chat_style"
+                android:textColor="@color/white"
+                android:textSize="11sp"
+                android:textStyle="bold"
+                android:layout_marginTop="8dp"
+                android:alpha="0.9" />
+        </LinearLayout>
+
+        <!-- Back to Live Button (Visible in VOD mode) -->
+        <LinearLayout
+            android:id="@+id/btnReturnLiveQuick"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="16dp"
+            android:orientation="vertical"
+            android:gravity="center"
+            android:paddingHorizontal="16dp"
+            android:focusable="true"
+            android:focusableInTouchMode="true"
+            android:clickable="true"
+            android:background="@android:color/transparent"
+            android:defaultFocusHighlightEnabled="false"
+            android:visibility="gone">
+
+            <FrameLayout
+                android:layout_width="56dp"
+                android:layout_height="56dp"
+                android:background="@drawable/quick_menu_selection_bg"
+                android:duplicateParentState="true">
+                <ImageView
+                    android:layout_width="28dp"
+                    android:layout_height="28dp"
+                    android:layout_gravity="center"
+                    android:src="@drawable/ic_play_circle"
+                    android:tint="@color/white" />
+            </FrameLayout>
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="@string/tv_quick_back_to_live"
+                android:textColor="@color/white"
+                android:textSize="11sp"
+                android:textStyle="bold"
+                android:layout_marginTop="8dp"
+                android:alpha="0.9" />
+        </LinearLayout>
+
         <!-- Quality (Resolution) Button -->
         <LinearLayout
             android:id="@+id/btnQualityQuick"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
+            android:layout_marginStart="16dp"
             android:orientation="vertical"
             android:gravity="center"
             android:paddingHorizontal="16dp"
@@ -737,7 +961,7 @@
                     android:focusableInTouchMode="true"
                     android:clickable="true"
                     android:nextFocusUp="@+id/drawerUserContainer"
-                    android:nextFocusDown="@+id/btnDrawerLanguageFilter">
+                    android:nextFocusDown="@+id/btnDrawerZeeVod">
  
                     <ImageView
                         android:layout_width="18dp"
@@ -748,6 +972,72 @@
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:text="@string/app_settings"
+                        android:textColor="@color/text_primary"
+                        android:textSize="12sp"
+                        android:layout_marginStart="16dp" />
+                </LinearLayout>
+
+                <!-- QUICK VOD SHORTCUTS -->
+                <LinearLayout
+                    android:id="@+id/btnDrawerZeeVod"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical"
+                    android:paddingHorizontal="32dp"
+                    android:paddingVertical="16dp"
+                    android:layout_marginHorizontal="12dp"
+                    android:layout_marginVertical="3dp"
+                    android:background="@drawable/selectable_item_background"
+                    android:focusable="true"
+                    android:focusableInTouchMode="true"
+                    android:clickable="true"
+                    android:nextFocusUp="@+id/btnDrawerSettings"
+                    android:nextFocusDown="@+id/btnDrawerChannelVods">
+
+                    <ImageView
+                        android:layout_width="18dp"
+                        android:layout_height="18dp"
+                        android:src="@drawable/ic_play_circle"
+                        android:tint="@color/brand_green" />
+
+                    <TextView
+                        android:id="@+id/txtDrawerZeeVod"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="@string/tv_drawer_zee_latest_vod"
+                        android:textColor="@color/brand_green"
+                        android:textStyle="bold"
+                        android:textSize="12sp"
+                        android:layout_marginStart="16dp" />
+                </LinearLayout>
+
+                <LinearLayout
+                    android:id="@+id/btnDrawerChannelVods"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical"
+                    android:paddingHorizontal="32dp"
+                    android:paddingVertical="16dp"
+                    android:layout_marginHorizontal="12dp"
+                    android:layout_marginVertical="3dp"
+                    android:background="@drawable/selectable_item_background"
+                    android:focusable="true"
+                    android:focusableInTouchMode="true"
+                    android:clickable="true"
+                    android:nextFocusUp="@+id/btnDrawerZeeVod"
+                    android:nextFocusDown="@+id/btnDrawerLanguageFilter">
+
+                    <ImageView
+                        android:layout_width="18dp"
+                        android:layout_height="18dp"
+                        android:src="@drawable/ic_history" />
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="@string/tv_drawer_channel_vods"
                         android:textColor="@color/text_primary"
                         android:textSize="12sp"
                         android:layout_marginStart="16dp" />
@@ -1405,14 +1695,15 @@
         </LinearLayout>
     </FrameLayout>
 
-    <!-- Chat Panel (slides from right, overlays content) -->
+    <!-- Chat Panel (slides from right, overlays fullscreen video in Overlay Mode) -->
     <LinearLayout
         android:id="@+id/chatPanel"
-        android:layout_width="300dp"
+        android:layout_width="320dp"
         android:layout_height="match_parent"
         android:layout_gravity="end"
         android:background="@drawable/chat_panel_background"
         android:orientation="vertical"
+        android:paddingHorizontal="4dp"
         android:elevation="8dp"
         android:visibility="gone">
 
@@ -1423,12 +1714,12 @@
             android:layout_height="0dp"
             android:layout_weight="1"
             android:clipToPadding="false"
-            android:paddingTop="10dp"
-            android:paddingBottom="10dp"
+            android:paddingTop="14dp"
+            android:paddingBottom="14dp"
             android:scrollbars="none"
             android:overScrollMode="never"
             android:fadingEdge="vertical"
-            android:fadingEdgeLength="24dp"
+            android:fadingEdgeLength="36dp"
             android:requiresFadingEdge="vertical" />
 
     </LinearLayout>

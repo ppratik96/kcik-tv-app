@@ -684,6 +684,17 @@ interface ChannelApiService {
         @Query("cursor") cursor: String? = null
     ): Response<dev.xacnio.kciktv.shared.data.model.ChatHistoryResponse>
 
+    /**
+     * Returns cursor-paginated chat messages before a microsecond timestamp cursor
+     * GET https://kick.com/api/v2/channels/{channelId}/messages?cursor=1794345000000000
+     */
+    @Headers("Accept: application/json")
+    @GET("api/v2/channels/{channelId}/messages")
+    suspend fun getChannelMessagesByCursor(
+        @Path("channelId") channelId: Long,
+        @Query("cursor") cursorMicroseconds: String
+    ): Response<dev.xacnio.kciktv.shared.data.model.ChatHistoryResponse>
+
     @Headers("Accept: application/json")
     @GET("api/v1/video/{id}")
     suspend fun getVideo(

@@ -1,21 +1,23 @@
-name: Build and Release
+name: Build and Release KickTV
 
 on:
   push:
     branches:
       - master
+      - main
     paths-ignore:
       - '**.md'
       - 'docs/**'
       - '.gitignore'
       - 'LICENSE'
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
   build:
-    name: Build APK
+    name: Build Signed KickTV APK
     runs-on: ubuntu-latest
 
     steps:
@@ -29,14 +31,14 @@ jobs:
         with:
           java-version: '17'
           distribution: 'temurin'
-          
+
       - name: Verify Translations
         run: python3 scripts/verify_translations_strict.py
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
-            gradle-version: 8.5
+          gradle-version: 8.5
 
       - name: Create google-services.json
         env:
@@ -50,37 +52,10 @@ jobs:
             echo "Used mock google-services.json from example file"
           fi
 
-      - name: Build with Gradle
-        run: gradle assembleRelease
+      - name: Build Signed Release APK
+        run: gradle assembleRelease --stacktrace
 
-      - name: Fix Android Build Tools Path
-        run: |
-          # Find the actual path where build-tools are
-          SDK_PATH=$ANDROID_HOME
-          # Get the latest version folder name
-          LATEST_VERSION=$(ls $SDK_PATH/build-tools | sort -V | tail -n 1)
-          echo "Found latest build tools version: $LATEST_VERSION"
-          
-          # Create the path that the action expects
-          sudo mkdir -p /usr/local/lib/android/sdk/build-tools/29.0.3
-          
-          # Symlink all files from the latest version to the 29.0.3 folder
-          sudo ln -s $SDK_PATH/build-tools/$LATEST_VERSION/* /usr/local/lib/android/sdk/build-tools/29.0.3/
-
-      - name: Sign APK
-        id: sign_app
-        uses: r0adkll/sign-android-release@v1
-        with:
-          releaseDirectory: app/build/outputs/apk/release
-          signingKeyBase64: ${{ secrets.SIGNING_KEY }}
-          alias: ${{ secrets.ALIAS }}
-          keyStorePassword: ${{ secrets.KEY_STORE_PASSWORD }}
-          keyPassword: ${{ secrets.KEY_PASSWORD }}
-
-      - name: Rename APK
-        run: mv ${{ steps.sign_app.outputs.signedReleaseFile }} app/build/outputs/apk/release/KCIKTV-release.apk
-
-      - name: Extract Version Name
+      - name: Extract Version & Prepare Release Assets
         id: version
         run: |
           VERSION_BASE=$(grep 'val baseVersion =' app/build.gradle.kts | head -n 1 | awk -F '"' '{print $2}')
@@ -90,17 +65,21 @@ jobs:
           echo "VERSION=$VERSION" >> $GITHUB_ENV
           echo "tag=v$VERSION" >> $GITHUB_OUTPUT
 
-          if [[ $VERSION_BASE == *"beta"* ]]; then
-            echo "is_prerelease=true" >> $GITHUB_OUTPUT
-          else
-            echo "is_prerelease=false" >> $GITHUB_OUTPUT
-          fi
+          APK_SRC=$(ls app/build/outputs/apk/release/*.apk | head -n 1)
+          echo "Located built APK: $APK_SRC"
+          test -f "$APK_SRC"
+
+          LATEST_BT=$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -n 1)
+          "$ANDROID_HOME/build-tools/$LATEST_BT/apksigner" verify --print-certs "$APK_SRC"
+
+          cp -f "$APK_SRC" "app/build/outputs/apk/release/KickTV.apk"
+          cp -f "$APK_SRC" "app/build/outputs/apk/release/KickTV-${VERSION}.apk"
 
           PREV_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
           if [ -n "$PREV_TAG" ]; then
             CHANGES=$(git log --pretty=format:"- %s" "$PREV_TAG"..HEAD)
           else
-            CHANGES=$(git log --pretty=format:"- %s" -20)
+            CHANGES=$(git log --pretty=format:"- %s" -10)
           fi
 
           {
@@ -108,28 +87,32 @@ jobs:
             echo "$CHANGES"
             echo EOF
           } >> $GITHUB_OUTPUT
-        
-      - name: Rename file to version
-        run: mv app/build/outputs/apk/release/KCIKTV-release.apk app/build/outputs/apk/release/KCIKTV-${{ env.VERSION }}.apk
 
-      - name: Create Release
+      - name: Publish GitHub Release
         id: create_release
         uses: softprops/action-gh-release@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tag_name: v${{ env.VERSION }}
-          name: KCIKTV v${{ env.VERSION }}
+          name: KickTV v${{ env.VERSION }}
           draft: false
-          prerelease: ${{ steps.version.outputs.is_prerelease }}
-          files: app/build/outputs/apk/release/KCIKTV-${{ env.VERSION }}.apk
+          prerelease: false
+          make_latest: true
+          files: |
+            app/build/outputs/apk/release/KickTV.apk
+            app/build/outputs/apk/release/KickTV-${{ env.VERSION }}.apk
           body: |
-            ## Changes
+            ## KickTV for Google TV & Android TV (`v${{ env.VERSION }}`)
+            - **Direct Google TV Downloader URL:** `pratikpa.tel/tv` (or `https://github.com/ppratik96/kcik-tv-app/releases/latest/download/KickTV.apk`)
+            - **Package ID:** `tel.pratikpa.kicktv`
+
+            ### Recent Changes
             ${{ steps.version.outputs.changes }}
-          generate_release_notes: true
+          generate_release_notes: false
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: KCIKTV-v${{ env.VERSION }}
-          path: app/build/outputs/apk/release/KCIKTV-${{ env.VERSION }}.apk
+          name: KickTV-v${{ env.VERSION }}
+          path: app/build/outputs/apk/release/KickTV.apk

@@ -23,6 +23,7 @@ import android.net.Uri
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.view.Gravity
 import android.view.KeyEvent
 import android.view.LayoutInflater
 import android.view.View
@@ -56,6 +57,7 @@ import android.graphics.drawable.Drawable
 import dev.xacnio.kciktv.shared.data.chat.KcikChatWebSocket
 import dev.xacnio.kciktv.shared.data.model.ChannelItem
 import dev.xacnio.kciktv.shared.data.model.ChatMessage
+import dev.xacnio.kciktv.shared.data.model.ListChannelVideo
 import dev.xacnio.kciktv.shared.data.model.LivestreamResponse
 import dev.xacnio.kciktv.shared.data.model.LiveStreamsResponse
 import dev.xacnio.kciktv.shared.data.prefs.AppPreferences
@@ -140,9 +142,10 @@ class PlayerActivity : FragmentActivity() {
     private var lastSubSettingsFocusId: String? = null
     private var originalThemeColor: Int = 0
 
-    private lateinit var binding: ActivityPlayerBinding
-    private lateinit var prefs: AppPreferences
-    private var ivsPlayer: Player? = null
+    internal lateinit var binding: ActivityPlayerBinding
+    internal lateinit var prefs: AppPreferences
+    internal var ivsPlayer: Player? = null
+    private lateinit var tvVodManager: TvVodManager
 
     private val isPipMode: Boolean
         get() = android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N && isInPictureInPictureMode
@@ -174,7 +177,7 @@ class PlayerActivity : FragmentActivity() {
     private var allChannels = mutableListOf<ChannelItem>()
     private var currentChannelIndex = 0
     private var nextCursor: String? = null
-    private var isChatVisible = false
+    internal var isChatVisible = false
     private var isStatsVisible = false
     
     private val hideHandler = Handler(Looper.getMainLooper())
@@ -227,8 +230,8 @@ class PlayerActivity : FragmentActivity() {
             
             val player = ivsPlayer
             if (player != null && player.state == Player.State.PLAYING) {
-                    // IVS Catch-up
-                    if (mode != "off") {
+                    // IVS Catch-up (Live streams only — keep VODs at exact 1.0x speed)
+                    if (!tvVodManager.isVodMode && mode != "off") {
                         val latency = player.liveLatency
                         val startThreshold = if (mode == "high") 2500L else 5000L
                         val stopThreshold = if (mode == "high") 1500L else 2500L
@@ -288,7 +291,7 @@ class PlayerActivity : FragmentActivity() {
     }
     
     // Chat
-    private var chatAdapter: ChatAdapter? = null
+    internal var chatAdapter: ChatAdapter? = null
     private var chatWebSocket: KcikChatWebSocket? = null
     private var mockChatSource: dev.xacnio.kciktv.shared.data.mock.MockChatSource? = null
     private val chatHandler = Handler(Looper.getMainLooper())
@@ -302,6 +305,10 @@ class PlayerActivity : FragmentActivity() {
     private val maxRecoveryAttempts = 12 // 12 * 5s = 60s
     private val recoveryRunnable: Runnable = object : Runnable {
         override fun run() {
+            if (tvVodManager.isVodMode) {
+                stopRecoveryPolling()
+                return
+            }
             val self = this
             if (recoveryAttempts >= maxRecoveryAttempts) {
                 Log.d("PlayerActivity", "Recovery polling timed out after 1 minute.")
@@ -375,7 +382,9 @@ class PlayerActivity : FragmentActivity() {
             
             when (intent.getIntExtra(EXTRA_CONTROL_TYPE, 0)) {
                 CONTROL_TYPE_PLAY_PAUSE -> {
-                    if (ivsPlayer?.state == com.amazonaws.ivs.player.Player.State.PLAYING) {
+                    if (tvVodManager.isVodMode) {
+                        tvVodManager.togglePlayPause()
+                    } else if (ivsPlayer?.state == com.amazonaws.ivs.player.Player.State.PLAYING) {
                         ivsPlayer?.pause()
                     } else {
                         ivsPlayer?.seekTo(ivsPlayer?.duration ?: 0L)
@@ -385,9 +394,13 @@ class PlayerActivity : FragmentActivity() {
                     updateMediaSessionState()
                 }
                 CONTROL_TYPE_LIVE -> {
-                    ivsPlayer?.seekTo(ivsPlayer?.duration ?: 0L)
-                    ivsPlayer?.play()
-                    updateMediaSessionState()
+                    if (tvVodManager.isVodMode) {
+                        exitVodToLive()
+                    } else {
+                        ivsPlayer?.seekTo(ivsPlayer?.duration ?: 0L)
+                        ivsPlayer?.play()
+                        updateMediaSessionState()
+                    }
                 }
                 CONTROL_TYPE_AUDIO_ONLY -> {
                     isBackgroundAudioEnabled = true
@@ -750,6 +763,7 @@ class PlayerActivity : FragmentActivity() {
         setupMediaSession()
         
         setupGestureDetectors()
+        tvVodManager = TvVodManager(this, repository)
         setupQuickMenu()
         setupRecyclerView()
         setupChat()
@@ -763,6 +777,9 @@ class PlayerActivity : FragmentActivity() {
         updateLanguageFilterButtonText()
         
         loadInitialChannels()
+        if (prefs.tvAutoPlayLatestVodOnStartup) {
+            tvVodManager.playChannelLatestVod(prefs.tvDefaultChannelSlug)
+        }
         
         checkForUpdates()
     }
@@ -1240,6 +1257,14 @@ class PlayerActivity : FragmentActivity() {
             hideDrawer(immediate = true)
             showSettingsSidebar() 
         }
+        binding.btnDrawerZeeVod.setOnClickListener {
+            hideAllOverlays()
+            tvVodManager.playChannelLatestVod(prefs.tvDefaultChannelSlug)
+        }
+        binding.btnDrawerChannelVods.setOnClickListener {
+            hideDrawer(immediate = true)
+            showChannelVodsSidebar()
+        }
         
         binding.drawerUserContainer.setOnClickListener {
             if (prefs.isLoggedIn) {
@@ -1394,6 +1419,10 @@ class PlayerActivity : FragmentActivity() {
         applyThemeToDynamicButton(binding.btnDrawerSearch, themeColor, currentListMode == ListMode.SEARCH)
         applyThemeToDynamicButton(binding.btnDrawerLanguageFilter, themeColor, sidebarContext == "LANGUAGE_FILTER")
         applyThemeToDynamicButton(binding.btnDrawerSettings, themeColor, false)
+        val favSlugLabel = prefs.tvDefaultChannelSlug.replaceFirstChar { if (it.isLowerCase()) it.titlecase(Locale.US) else it.toString() }
+        binding.txtDrawerZeeVod.text = "$favSlugLabel — Latest VOD"
+        applyThemeToDynamicButton(binding.btnDrawerZeeVod, themeColor, tvVodManager.isVodMode && tvVodManager.currentChannel?.slug.equals(prefs.tvDefaultChannelSlug, ignoreCase = true))
+        applyThemeToDynamicButton(binding.btnDrawerChannelVods, themeColor, sidebarContext == "vods")
         applyThemeToDynamicButton(binding.drawerUserContainer, themeColor, false)
     }
 
@@ -2136,8 +2165,9 @@ class PlayerActivity : FragmentActivity() {
         }
         
         // Initialize chat panel as hidden (translated off screen)
-        binding.chatPanel.translationX = 280f * resources.displayMetrics.density
+        binding.chatPanel.translationX = 320f * resources.displayMetrics.density
         binding.chatPanel.visibility = View.GONE
+        applyChatPanelLayoutAndStyle()
         
         // Initialize WebSocket early to listen for channel events (even if chat is closed)
         setupWebSocket()
@@ -2178,6 +2208,7 @@ class PlayerActivity : FragmentActivity() {
         }
         
         if (event.contains("StreamerIsLive")) {
+            if (tvVodManager.isVodMode) return
             Log.d("PlayerActivity", "Received StreamerIsLive event! Refreshing channel to start playback...")
             stopRecoveryPolling() // Event is better than polling
             // Small delay to ensure HLS playlist is fully ready on server after event
@@ -2220,10 +2251,15 @@ class PlayerActivity : FragmentActivity() {
         binding.sidebarLoadingBar.indeterminateTintList = ColorStateList.valueOf(themeColor)
         
         // Apply to Quick Menu Buttons
+        applyThemeToQuickButton(binding.btnVodsQuick, themeColor)
+        applyThemeToQuickButton(binding.btnChatOverlayQuick, themeColor)
+        applyThemeToQuickButton(binding.btnReturnLiveQuick, themeColor)
         applyThemeToQuickButton(binding.btnQualityQuick, themeColor)
         applyThemeToQuickButton(binding.btnRefreshQuick, themeColor)
         applyThemeToQuickButton(binding.btnStatsQuick, themeColor)
         applyThemeToQuickButton(binding.btnPipQuick, themeColor, Color.parseColor("#1976D2")) // Distinct Blue for PIP
+
+        applyChatPanelLayoutAndStyle()
         
         // Update Adapter Themes
         // Update Sidebar themes
@@ -2289,8 +2325,23 @@ class PlayerActivity : FragmentActivity() {
     }
 
     private fun setupQuickMenu() {
+        binding.btnVodsQuick.setOnClickListener { showChannelVodsSidebar() }
+        binding.btnChatOverlayQuick.setOnClickListener { cycleTvChatOverlayPreset() }
+        binding.btnReturnLiveQuick.setOnClickListener { exitVodToLive() }
         binding.btnQualityQuick.setOnClickListener { toggleQualityMenu() }
-        binding.btnRefreshQuick.setOnClickListener { hideAllOverlays(); playCurrentChannel() }
+        binding.btnRefreshQuick.setOnClickListener {
+            hideAllOverlays()
+            if (tvVodManager.isVodMode) {
+                val vid = tvVodManager.currentVideo
+                val ch = tvVodManager.currentChannel
+                val pos = ivsPlayer?.position?.coerceAtLeast(0L) ?: 0L
+                if (vid != null && ch != null) {
+                    tvVodManager.playVod(vid, ch, explicitStartPositionMs = pos)
+                }
+            } else {
+                playCurrentChannel()
+            }
+        }
         binding.btnStatsQuick.setOnClickListener { toggleStats() }
     }
     
@@ -2432,8 +2483,15 @@ class PlayerActivity : FragmentActivity() {
                     stopStabilityWatchdog()
                 } else if (state == Player.State.ENDED) {
                     stopStabilityWatchdog()
-                    allChannels.getOrNull(currentChannelIndex)?.let { updateChannelUIForOffline(it) }
-                    startRecoveryPolling()
+                    if (tvVodManager.isVodMode) {
+                        val finishedId = tvVodManager.currentVideo?.uuid ?: tvVodManager.currentVideo?.id?.toString()
+                        if (finishedId != null) prefs.removeVodProgress(finishedId)
+                        Toast.makeText(this@PlayerActivity, "VOD playback completed", Toast.LENGTH_SHORT).show()
+                        showChannelVodsSidebar()
+                    } else {
+                        allChannels.getOrNull(currentChannelIndex)?.let { updateChannelUIForOffline(it) }
+                        startRecoveryPolling()
+                    }
                 } else {
                     stopStabilityWatchdog()
                 }
@@ -2457,6 +2515,7 @@ class PlayerActivity : FragmentActivity() {
             override fun onCue(cue: Cue) {}
             override fun onDurationChanged(duration: Long) {}
             override fun onMetadata(type: String, data: ByteBuffer) {
+                if (tvVodManager.isVodMode) return
                 // Optimization: Parse metadata on a background thread to avoid UI jank
                 val dataCopy = data.duplicate()
                 lifecycleScope.launch(Dispatchers.Default) {
@@ -2542,15 +2601,19 @@ class PlayerActivity : FragmentActivity() {
                 }
                 
                 channelSidebarAdapter?.replaceChannels(allChannels, currentChannelIndex, nextCursor != null)
-                playCurrentChannel(useZapDelay = false)
+                if (!tvVodManager.isVodMode) {
+                    playCurrentChannel(useZapDelay = false)
                     showInfoOverlay() // Show info for the first channel automatically
+                }
                 } else if (nextCursor != null && currentListMode == ListMode.GLOBAL) {
                     loadInitialChannels()
-                } else if (filtered.isEmpty()) {
+                } else if (filtered.isEmpty() && !tvVodManager.isVodMode) {
                     showError(getString(R.string.list_empty))
                 }
             }.onFailure {
-                showError(getString(R.string.channels_load_failed))
+                if (!tvVodManager.isVodMode) {
+                    showError(getString(R.string.channels_load_failed))
+                }
             }
         }
     }
@@ -2597,6 +2660,10 @@ class PlayerActivity : FragmentActivity() {
     }
     
     private fun playCurrentChannel(useZapDelay: Boolean = false, showInfo: Boolean = true, keepBanner: Boolean = false, isRetry: Boolean = false) {
+        if (tvVodManager.isVodMode) {
+            tvVodManager.stopVodPlayback(restoreLiveFlags = true)
+            binding.vodTransportContainer.visibility = View.GONE
+        }
         if (allChannels.isEmpty()) return
         
         stopRecoveryPolling()
@@ -2650,6 +2717,7 @@ class PlayerActivity : FragmentActivity() {
 
         if (!channel.isLive) {
             updateChannelUIForOffline(channel)
+            showError("${getString(R.string.stream_offline)} • Press OK → VODs for Latest VOD")
             return
         }
 
@@ -2882,6 +2950,18 @@ class PlayerActivity : FragmentActivity() {
         resetHideTimer()
     }
 
+    private fun getVisibleQuickMenuButtons(): List<View> {
+        return listOf(
+            binding.btnVodsQuick,
+            binding.btnChatOverlayQuick,
+            binding.btnReturnLiveQuick,
+            binding.btnQualityQuick,
+            binding.btnRefreshQuick,
+            binding.btnStatsQuick,
+            binding.btnPipQuick
+        ).filter { it.visibility == View.VISIBLE }
+    }
+
     private fun showQuickMenu() {
         hideHandler.removeCallbacks(hideRunnable) 
         hideAllOverlays()
@@ -2890,12 +2970,17 @@ class PlayerActivity : FragmentActivity() {
         
         currentState = MenuState.QUICK_MENU
         
-        // Quality available only for live streams
         val currentChannel = allChannels.getOrNull(currentChannelIndex)
-        val isLive = currentChannel?.isLive == true
-        
-        binding.btnQualityQuick.visibility = if (isLive) View.VISIBLE else View.GONE
-        binding.btnStatsQuick.visibility = if (isLive) View.VISIBLE else View.GONE
+        val isVod = tvVodManager.isVodMode
+        val isLive = !isVod && currentChannel?.isLive == true
+        val hasActiveStream = isLive || isVod
+
+        binding.btnVodsQuick.visibility = View.VISIBLE
+        binding.btnChatOverlayQuick.visibility = View.VISIBLE
+        binding.txtChatOverlayQuick.text = currentChatOverlayShortLabel()
+        binding.btnReturnLiveQuick.visibility = if (isVod) View.VISIBLE else View.GONE
+        binding.btnQualityQuick.visibility = if (hasActiveStream) View.VISIBLE else View.GONE
+        binding.btnStatsQuick.visibility = if (hasActiveStream) View.VISIBLE else View.GONE
         binding.btnRefreshQuick.visibility = View.VISIBLE
         
         // Show PIP button: Always on TV, only for "Manual" mode on Mobile
@@ -2903,21 +2988,11 @@ class PlayerActivity : FragmentActivity() {
                            (isTvDevice() || !prefs.autoPipEnabled)
         binding.btnPipQuick.visibility = if (showPipButton) View.VISIBLE else View.GONE
         
-        // Set focus navigation for PIP button based on visible buttons
-        if (showPipButton) {
-            if (isLive) {
-                // Stats visible: Stats -> PIP
-                binding.btnStatsQuick.nextFocusRightId = R.id.btnPipQuick
-                binding.btnPipQuick.nextFocusLeftId = R.id.btnStatsQuick
-            } else {
-                // Stats hidden: Refresh -> PIP
-                binding.btnRefreshQuick.nextFocusRightId = R.id.btnPipQuick
-                binding.btnPipQuick.nextFocusLeftId = R.id.btnRefreshQuick
-            }
-        } else {
-            // Reset focus navigation
-            binding.btnStatsQuick.nextFocusRightId = View.NO_ID
-            binding.btnRefreshQuick.nextFocusRightId = View.NO_ID
+        // Wire horizontal D-Pad focus order cleanly across all visible Quick Menu buttons
+        val visibleButtons = getVisibleQuickMenuButtons()
+        visibleButtons.forEachIndexed { idx, btn ->
+            btn.nextFocusLeftId = if (idx > 0) visibleButtons[idx - 1].id else btn.id
+            btn.nextFocusRightId = if (idx < visibleButtons.lastIndex) visibleButtons[idx + 1].id else btn.id
         }
         
         // PIP button click handler
@@ -2926,7 +3001,7 @@ class PlayerActivity : FragmentActivity() {
             enterPipMode()
         }
         
-        val targetButton = if (isLive) binding.btnQualityQuick else binding.btnRefreshQuick
+        val targetButton = binding.btnVodsQuick
         
         if (prefs.animationsEnabled) {
             binding.quickMenuOverlay.translationY = 50f
@@ -2952,8 +3027,9 @@ class PlayerActivity : FragmentActivity() {
     private fun showChannelSidebar(requestFocus: Boolean = true) {
         hideHandler.removeCallbacks(hideRunnable)
         
-        // Auto-hide chat when sidebar is opened (for mobile usability)
-        if (isChatVisible) {
+        // Auto-hide chat when sidebar is opened ONLY on narrow screens or Side-by-Side mode
+        val narrowScreen = resources.displayMetrics.widthPixels < (720f * resources.displayMetrics.density).toInt()
+        if (isChatVisible && (narrowScreen || !prefs.tvChatOverlayMode)) {
             hideChat()
         }
         
@@ -3247,6 +3323,7 @@ class PlayerActivity : FragmentActivity() {
 
     private fun showSettingsSidebar() {
         val items = listOf(
+            SelectionItem("cat_vod_overlay", "Chat Overlay & VODs"),
             SelectionItem("cat_general", getString(R.string.settings_category_general)),
             SelectionItem("cat_player", getString(R.string.settings_category_player)),
             SelectionItem("cat_appearance", getString(R.string.settings_category_appearance)),
@@ -3258,6 +3335,7 @@ class PlayerActivity : FragmentActivity() {
         showSidebar(getString(R.string.settings), items, "settings", animate = true, initialFocusId = lastSettingsFocusId) { item ->
             lastSettingsFocusId = item.id
             when (item.id) {
+                "cat_vod_overlay" -> showVodAndOverlaySettings()
                 "cat_general" -> showGeneralSettings()
                 "cat_player" -> showPlayerSettings()
                 "cat_appearance" -> showAppearanceSettings()
@@ -3851,7 +3929,7 @@ class PlayerActivity : FragmentActivity() {
                 
                 when (keyCode) {
                     KeyEvent.KEYCODE_DPAD_LEFT -> {
-                        if (!isChannelMenu)
+                        if (!isChannelMenu && sidebarContext != "vods")
                             return true
                     }
                     KeyEvent.KEYCODE_DPAD_UP -> {
@@ -3927,20 +4005,58 @@ class PlayerActivity : FragmentActivity() {
                 }
             }
             if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT) {
-                if (sidebarContext == "channels") {
+                if (sidebarContext == "channels" || sidebarContext == "vods") {
                     showDrawer()
                 }
                 return true
             }
         }
-        when (keyCode) {
-            KeyEvent.KEYCODE_DPAD_UP -> {
-                if (currentState == MenuState.INFO) {
-                    nextChannel()
+
+        // Dedicated Google TV / Android TV media transport keys in VOD mode
+        if (tvVodManager.isVodMode && (currentState == MenuState.NONE || currentState == MenuState.INFO)) {
+            when (keyCode) {
+                KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> {
+                    tvVodManager.togglePlayPause()
+                    showInfoOverlay()
                     return true
                 }
-                if (currentState == MenuState.NONE) {
-                    nextChannel()
+                KeyEvent.KEYCODE_MEDIA_PLAY -> {
+                    if (ivsPlayer?.state != Player.State.PLAYING) {
+                        tvVodManager.togglePlayPause()
+                    }
+                    showInfoOverlay()
+                    return true
+                }
+                KeyEvent.KEYCODE_MEDIA_PAUSE -> {
+                    if (ivsPlayer?.state == Player.State.PLAYING) {
+                        tvVodManager.togglePlayPause()
+                    }
+                    showInfoOverlay()
+                    return true
+                }
+                KeyEvent.KEYCODE_MEDIA_REWIND -> {
+                    showInfoOverlay()
+                    tvVodManager.scrubBy(-1, event?.repeatCount ?: 0)
+                    resetHideTimer()
+                    return true
+                }
+                KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> {
+                    showInfoOverlay()
+                    tvVodManager.scrubBy(+1, event?.repeatCount ?: 0)
+                    resetHideTimer()
+                    return true
+                }
+            }
+        }
+
+        when (keyCode) {
+            KeyEvent.KEYCODE_DPAD_UP -> {
+                if (currentState == MenuState.INFO || currentState == MenuState.NONE) {
+                    if (tvVodManager.isVodMode) {
+                        if (isChatVisible) hideChat() else showChat()
+                    } else {
+                        nextChannel()
+                    }
                     return true
                 }
                 // Trap up in Quick Menu to prevent focus escaping
@@ -3949,12 +4065,12 @@ class PlayerActivity : FragmentActivity() {
                 }
             }
             KeyEvent.KEYCODE_DPAD_DOWN -> {
-                if (currentState == MenuState.INFO) {
-                    previousChannel()
-                    return true
-                }
-                if (currentState == MenuState.NONE) {
-                    previousChannel()
+                if (currentState == MenuState.INFO || currentState == MenuState.NONE) {
+                    if (tvVodManager.isVodMode) {
+                        showQuickMenu()
+                    } else {
+                        previousChannel()
+                    }
                     return true
                 }
                 // Trap down in Quick Menu to prevent focus escaping
@@ -3964,16 +4080,20 @@ class PlayerActivity : FragmentActivity() {
             }
             KeyEvent.KEYCODE_DPAD_RIGHT -> {
                 if (currentState == MenuState.NONE || currentState == MenuState.INFO) {
-                    if (!isChatVisible) showChat() else hideChat()
+                    if (tvVodManager.isVodMode) {
+                        showInfoOverlay()
+                        tvVodManager.scrubBy(+1, event?.repeatCount ?: 0)
+                        resetHideTimer()
+                    } else {
+                        if (!isChatVisible) showChat() else hideChat()
+                    }
                     return true
                 }
                 // In Quick Menu: allow right navigation between buttons, trap only at last visible button
                 if (currentState == MenuState.QUICK_MENU) {
                     val focused = currentFocus
-                    val isPipVisible = binding.btnPipQuick.visibility == View.VISIBLE
-                    // Trap at PIP if visible, otherwise trap at Stats
-                    val lastButton = if (isPipVisible) binding.btnPipQuick else binding.btnStatsQuick
-                    if (focused == lastButton) {
+                    val lastButton = getVisibleQuickMenuButtons().lastOrNull()
+                    if (focused != null && focused == lastButton) {
                         return true // At last button, trap
                     }
                     // Otherwise let default focus handling move to next button
@@ -3981,22 +4101,36 @@ class PlayerActivity : FragmentActivity() {
             }
             KeyEvent.KEYCODE_DPAD_LEFT -> {
                 if (currentState == MenuState.NONE || currentState == MenuState.INFO) {
-                    showChannelSidebar()
+                    if (tvVodManager.isVodMode) {
+                        showInfoOverlay()
+                        tvVodManager.scrubBy(-1, event?.repeatCount ?: 0)
+                        resetHideTimer()
+                    } else {
+                        showChannelSidebar()
+                    }
                     return true
                 }
                 // In Quick Menu: allow left navigation between buttons, trap only at first visible button
                 if (currentState == MenuState.QUICK_MENU) {
                     val focused = currentFocus
-                    val isQualityVisible = binding.btnQualityQuick.visibility == View.VISIBLE
-                    // Trap at Quality if visible, otherwise trap at Refresh
-                    val firstButton = if (isQualityVisible) binding.btnQualityQuick else binding.btnRefreshQuick
-                    if (focused == firstButton) {
+                    val firstButton = getVisibleQuickMenuButtons().firstOrNull()
+                    if (focused != null && focused == firstButton) {
                         return true // At first button, trap
                     }
                     // Otherwise let default focus handling move to previous button
                 }
             }
             KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> {
+                if (tvVodManager.isVodMode && (currentState == MenuState.NONE || currentState == MenuState.INFO)) {
+                    if (tvVodManager.hasPendingScrub) {
+                        tvVodManager.commitPendingScrub()
+                        resetHideTimer()
+                    } else {
+                        tvVodManager.togglePlayPause()
+                        showInfoOverlay()
+                    }
+                    return true
+                }
                 if (currentState == MenuState.NONE) {
                     showInfoOverlay()
                     return true
@@ -4042,13 +4176,11 @@ class PlayerActivity : FragmentActivity() {
                 return true
             }
             KeyEvent.KEYCODE_BACK, KeyEvent.KEYCODE_ESCAPE -> {
-                if (isChatVisible) {
-                    hideChat()
-                    return true
-                }
                 when (currentState) {
                     MenuState.SIDEBAR -> { 
-                        if (sidebarContext == "settings_sub" || sidebarContext == "settings_theme" || 
+                        if (sidebarContext == "settings_vod_sub") {
+                            showVodAndOverlaySettings()
+                        } else if (sidebarContext == "settings_sub" || sidebarContext == "settings_theme" || 
                             sidebarContext == "settings_engine" || sidebarContext == "settings_background" || 
                             sidebarContext == "settings_auto_pip") {
                             
@@ -4073,6 +4205,14 @@ class PlayerActivity : FragmentActivity() {
                     MenuState.QUICK_MENU -> { hideAllOverlays(); return true }
                     MenuState.INFO -> { hideAllOverlays(); return true }
                     MenuState.NONE -> {
+                        if (tvVodManager.isVodMode) {
+                            exitVodToLive()
+                            return true
+                        }
+                        if (isChatVisible) {
+                            hideChat()
+                            return true
+                        }
                         if (backPressedTime + 2000 > System.currentTimeMillis()) finishAffinity()
                         else { 
                             Toast.makeText(this, getString(R.string.press_again_to_exit), Toast.LENGTH_SHORT).show()
@@ -4090,7 +4230,7 @@ class PlayerActivity : FragmentActivity() {
                         return true
                     }
                     MenuState.QUALITY -> {
-                        showDrawer()
+                        showQuickMenu()
                         return true
                     }
                     else -> { hideAllOverlays(); return true }
@@ -4111,20 +4251,22 @@ class PlayerActivity : FragmentActivity() {
     }
 
     private fun nextChannel() { 
-        if (currentListMode == ListMode.SEARCH) return
+        if (currentListMode == ListMode.SEARCH || allChannels.isEmpty()) return
         currentChannelIndex = (currentChannelIndex + 1) % allChannels.size; 
         playCurrentChannel(useZapDelay = true) 
     }
     private fun previousChannel() { 
-        if (currentListMode == ListMode.SEARCH) return
+        if (currentListMode == ListMode.SEARCH || allChannels.isEmpty()) return
         currentChannelIndex = if (currentChannelIndex > 0) currentChannelIndex - 1 else allChannels.size - 1; 
         playCurrentChannel(useZapDelay = true) 
     }
     private fun refreshActiveChannelDetails() {
+        if (tvVodManager.isVodMode) return
         if (allChannels.isEmpty() || currentChannelIndex >= allChannels.size) return
         val activeChannel = allChannels[currentChannelIndex]
         lifecycleScope.launch {
             repository.getLiveStreamDetails(activeChannel.slug).onSuccess { details: LivestreamResponse ->
+                if (tvVodManager.isVodMode) return@onSuccess
                 // Check safety again inside coroutine as list might have cleared during API call
                 if (allChannels.isEmpty() || currentChannelIndex >= allChannels.size) return@onSuccess
                 
@@ -4195,17 +4337,19 @@ class PlayerActivity : FragmentActivity() {
                         currentChannelIndex = newIndex
                         val currentChannel = allChannels[currentChannelIndex]
                         
-                        // Update UI
-                        binding.viewerCount.text = formatViewerCount(currentChannel.viewerCount)
-                        binding.streamTitle.text = currentChannel.title
-                        binding.categoryName.text = currentChannel.categoryName ?: getString(R.string.live_stream)
-                        binding.channelNumber.text = String.format("%02d", currentChannelIndex + 1)
+                        // Update UI only when watching live stream
+                        if (!tvVodManager.isVodMode) {
+                            binding.viewerCount.text = formatViewerCount(currentChannel.viewerCount)
+                            binding.streamTitle.text = currentChannel.title
+                            binding.categoryName.text = currentChannel.categoryName ?: getString(R.string.live_stream)
+                            binding.channelNumber.text = String.format("%02d", currentChannelIndex + 1)
+                        }
                     } else {
                         // Find first safe channel (non-mature)
                         val safeIndex = allChannels.indexOfFirst { !it.isMature }
                         currentChannelIndex = if (safeIndex != -1) safeIndex else 0
                         
-                        if (allChannels.isNotEmpty()) {
+                        if (allChannels.isNotEmpty() && !tvVodManager.isVodMode) {
                             playCurrentChannel()
                         }
                     }
@@ -4213,8 +4357,8 @@ class PlayerActivity : FragmentActivity() {
                     // Update adapter
                     channelSidebarAdapter?.replaceChannels(allChannels, currentChannelIndex, nextCursor != null)
 
-                    // If sidebar is visible (e.g. user just switched list mode), shift focus to the new channel
-                    if (binding.sidebarMenu.visibility == View.VISIBLE && allChannels.isNotEmpty()) {
+                    // If channel sidebar is visible, shift focus to the new channel
+                    if (binding.sidebarMenu.visibility == View.VISIBLE && isChannelMenu && allChannels.isNotEmpty()) {
                         binding.sidebarRecyclerView.post {
                             val lm = binding.sidebarRecyclerView.layoutManager as? androidx.recyclerview.widget.LinearLayoutManager
                             lm?.scrollToPositionWithOffset(currentChannelIndex, 200)
@@ -4263,6 +4407,24 @@ class PlayerActivity : FragmentActivity() {
     private fun scheduleRetry() {
         // Cancel previous retry
         retryHandler.removeCallbacksAndMessages(null)
+
+        if (tvVodManager.isVodMode) {
+            if (retryCount >= 3) {
+                showError(getString(R.string.connection_failed))
+                return
+            }
+            retryCount++
+            showError(getString(R.string.stream_error_retrying, retryCount, 3))
+            val resumePos = ivsPlayer?.position?.coerceAtLeast(0L) ?: 0L
+            retryHandler.postDelayed({
+                val vid = tvVodManager.currentVideo
+                val ch = tvVodManager.currentChannel
+                if (tvVodManager.isVodMode && vid != null && ch != null) {
+                    tvVodManager.playVod(vid, ch, explicitStartPositionMs = resumePos)
+                }
+            }, retryDelayMs)
+            return
+        }
         
         // Check maximum retry count
         if (retryCount >= maxRetryCount) {
@@ -4286,6 +4448,7 @@ class PlayerActivity : FragmentActivity() {
     }
     
     private fun retryCurrentChannel() {
+        if (tvVodManager.isVodMode) return
         if (allChannels.isEmpty()) return
         val channel = allChannels[currentChannelIndex]
         
@@ -4474,85 +4637,107 @@ class PlayerActivity : FragmentActivity() {
     }
     
     private fun showChat() {
-        if (allChannels.isEmpty()) return
+        if (!tvVodManager.isVodMode && allChannels.isEmpty()) return
         
         isChatVisible = true
-        val channel = allChannels[currentChannelIndex]
+        applyChatPanelLayoutAndStyle()
         
         // Make panel visible
         binding.chatPanel.visibility = View.VISIBLE
         
         // Animation values
-        val chatWidthPx = (300f * resources.displayMetrics.density).toInt()
+        val chatWidthPx = (320f * resources.displayMetrics.density).toInt()
+        val targetMarginEnd = if (prefs.tvChatOverlayMode) 0 else chatWidthPx
+        val currentMarginEnd = (binding.playerContainer.layoutParams as FrameLayout.LayoutParams).marginEnd
         
         if (prefs.animationsEnabled) {
             // Chat slide in from right
             binding.chatPanel.translationX = chatWidthPx.toFloat()
             binding.chatPanel.animate()
                 .translationX(0f)
-                .setDuration(300)
+                .setDuration(260)
                 .setInterpolator(AccelerateDecelerateInterpolator())
                 .start()
             
-            // Player container smooth shrink with margin animation
-            val marginAnimator = ValueAnimator.ofInt(0, chatWidthPx)
-            marginAnimator.duration = 300
-            marginAnimator.interpolator = AccelerateDecelerateInterpolator()
-            marginAnimator.addUpdateListener { animation ->
-                val animatedValue = animation.animatedValue as Int
-                val lp = binding.playerContainer.layoutParams as FrameLayout.LayoutParams
-                lp.marginEnd = animatedValue
-                binding.playerContainer.layoutParams = lp
+            if (currentMarginEnd != targetMarginEnd) {
+                val marginAnimator = ValueAnimator.ofInt(currentMarginEnd, targetMarginEnd)
+                marginAnimator.duration = 260
+                marginAnimator.interpolator = AccelerateDecelerateInterpolator()
+                marginAnimator.addUpdateListener { animation ->
+                    val animatedValue = animation.animatedValue as Int
+                    val lp = binding.playerContainer.layoutParams as FrameLayout.LayoutParams
+                    lp.marginEnd = animatedValue
+                    binding.playerContainer.layoutParams = lp
+                }
+                marginAnimator.start()
             }
-            marginAnimator.start()
         } else {
             binding.chatPanel.translationX = 0f
             val lp = binding.playerContainer.layoutParams as FrameLayout.LayoutParams
-            lp.marginEnd = chatWidthPx
+            lp.marginEnd = targetMarginEnd
             binding.playerContainer.layoutParams = lp
         }
         
-        // Start/Update chat session (will subscribe to chat since isChatVisible is now true)
-        connectToChat(channel.slug)
+        // Start/Update live WebSocket chat session ONLY in Live Mode
+        if (!tvVodManager.isVodMode && allChannels.isNotEmpty()) {
+            val channel = allChannels[currentChannelIndex]
+            connectToChat(channel.slug)
+        } else {
+            val count = chatAdapter?.itemCount ?: 0
+            if (count > 0) {
+                binding.chatRecyclerView.post {
+                    binding.chatRecyclerView.scrollToPosition(count - 1)
+                }
+            }
+        }
     }
     
     private fun hideChat() {
         isChatVisible = false
+        val inVod = tvVodManager.isVodMode
         
-        // Unsubscribe from chat to save data, but keep connection for channel events
-        chatWebSocket?.unsubscribeFromChat()
-        chatAdapter?.clearMessages()
+        // Unsubscribe from live WebSocket chat to save data in Live Mode;
+        // in VOD Mode keep buffered VOD messages intact so reopening chat with ▲ is instant!
+        if (!inVod) {
+            chatWebSocket?.unsubscribeFromChat()
+            chatAdapter?.clearMessages()
+        }
         
-        val chatWidthPx = (300f * resources.displayMetrics.density).toInt()
+        val chatWidthPx = (320f * resources.displayMetrics.density).toInt()
         val currentMargin = (binding.playerContainer.layoutParams as FrameLayout.LayoutParams).marginEnd
         
         if (prefs.animationsEnabled) {
             // Chat slide out to right
             binding.chatPanel.animate()
                 .translationX(chatWidthPx.toFloat())
-                .setDuration(250)
+                .setDuration(220)
                 .setInterpolator(AccelerateDecelerateInterpolator())
                 .withEndAction {
                     binding.chatPanel.visibility = View.GONE
-                    chatAdapter?.clearMessages()
+                    if (!tvVodManager.isVodMode) {
+                        chatAdapter?.clearMessages()
+                    }
                 }
                 .start()
             
-            // Player container smooth grow with margin animation
-            val marginAnimator = ValueAnimator.ofInt(currentMargin, 0)
-            marginAnimator.duration = 250
-            marginAnimator.interpolator = AccelerateDecelerateInterpolator()
-            marginAnimator.addUpdateListener { animation ->
-                val animatedValue = animation.animatedValue as Int
-                val lp = binding.playerContainer.layoutParams as FrameLayout.LayoutParams
-                lp.marginEnd = animatedValue
-                binding.playerContainer.layoutParams = lp
+            if (currentMargin != 0) {
+                val marginAnimator = ValueAnimator.ofInt(currentMargin, 0)
+                marginAnimator.duration = 220
+                marginAnimator.interpolator = AccelerateDecelerateInterpolator()
+                marginAnimator.addUpdateListener { animation ->
+                    val animatedValue = animation.animatedValue as Int
+                    val lp = binding.playerContainer.layoutParams as FrameLayout.LayoutParams
+                    lp.marginEnd = animatedValue
+                    binding.playerContainer.layoutParams = lp
+                }
+                marginAnimator.start()
             }
-            marginAnimator.start()
         } else {
             binding.chatPanel.visibility = View.GONE
             binding.chatPanel.translationX = chatWidthPx.toFloat()
-            chatAdapter?.clearMessages()
+            if (!inVod) {
+                chatAdapter?.clearMessages()
+            }
             val lp = binding.playerContainer.layoutParams as FrameLayout.LayoutParams
             lp.marginEnd = 0
             binding.playerContainer.layoutParams = lp
@@ -4691,14 +4876,19 @@ class PlayerActivity : FragmentActivity() {
             return
         }
         ivsPlayer?.play()
-        startRefreshTimer()
-        // Reconnect chat if it was visible
-        if (isChatVisible && allChannels.isNotEmpty()) {
-            val channel = allChannels[currentChannelIndex]
-            connectToChat(channel.slug)
+        if (!tvVodManager.isVodMode) {
+            startRefreshTimer()
+            // Reconnect live chat if it was visible
+            if (isChatVisible && allChannels.isNotEmpty()) {
+                val channel = allChannels[currentChannelIndex]
+                connectToChat(channel.slug)
+            }
         }
     }
     override fun onDestroy() { 
+        if (::tvVodManager.isInitialized) {
+            tvVodManager.stopVodPlayback(restoreLiveFlags = false)
+        }
         super.onDestroy()
         try {
             unregisterReceiver(pipReceiver)
@@ -4730,16 +4920,19 @@ class PlayerActivity : FragmentActivity() {
 
     private fun parseIsoDate(dateStr: String): Long? {
         return try {
-            // Kick uses ISO-8601 (e.g., 2026-01-08T20:06:13.629Z)
+            val normalized = dateStr.trim().let { raw ->
+                if (raw.length >= 19 && raw[10] == ' ') raw.substring(0, 10) + "T" + raw.substring(11) else raw
+            }
             val sdf = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.US)
             sdf.timeZone = TimeZone.getTimeZone("UTC")
-            sdf.parse(dateStr)?.time
+            sdf.parse(normalized)?.time
         } catch (e: Exception) {
             null
         }
     }
 
     private fun updateUptimeDisplay() {
+        if (tvVodManager.isVodMode) return
         val start = streamCreatedAtMillis ?: return
         val now = System.currentTimeMillis()
         val diffSeconds = (now - start) / 1000
@@ -4943,6 +5136,9 @@ class PlayerActivity : FragmentActivity() {
     }
 
     override fun onPause() {
+        if (::tvVodManager.isInitialized && tvVodManager.isVodMode) {
+            tvVodManager.saveWatchProgress()
+        }
         super.onPause()
         
         // Don't do anything if entering PIP mode - player continues seamlessly
@@ -4971,6 +5167,9 @@ class PlayerActivity : FragmentActivity() {
     }
 
     override fun onStop() {
+        if (::tvVodManager.isInitialized && tvVodManager.isVodMode) {
+            tvVodManager.saveWatchProgress()
+        }
         super.onStop()
         
         // On TV: Always stop playback when going to background (no background audio on TV)
@@ -4994,6 +5193,7 @@ class PlayerActivity : FragmentActivity() {
     }
 
     private fun startRecoveryPolling() {
+        if (tvVodManager.isVodMode) return
         stopRecoveryPolling()
         recoveryAttempts = 0
         Log.d("PlayerActivity", "Starting quick recovery polling for 1 minute...")
@@ -5044,6 +5244,530 @@ class PlayerActivity : FragmentActivity() {
                       }
                  }
              }
+        }
+    }
+
+    // ==================== TV VOD Playback & Translucent Chat Overlay ====================
+
+    internal fun preparePlayerForVod(
+        channel: ChannelItem,
+        vodTitle: String,
+        categoryName: String?,
+        views: Int,
+        thumbnailUrl: String?
+    ) {
+        loadingJob?.cancel()
+        chatConnectJob?.cancel()
+        chatWebSocket?.unsubscribeFromChat()
+        mockChatSource?.stop()
+        mockChatSource = null
+
+        stopRecoveryPolling()
+        resetRetryCount()
+        hideError()
+        refreshHandler.removeCallbacks(activeChannelRefreshRunnable)
+        uptimeHandler.removeCallbacks(uptimeRunnable)
+        streamCreatedAtMillis = null
+
+        binding.offlineBannerView.visibility = View.GONE
+        binding.playerView.visibility = View.VISIBLE
+        binding.sidebarLoadingBar.visibility = View.VISIBLE
+
+        val defaultThumb = Constants.Urls.DEFAULT_LIVESTREAM_THUMBNAIL
+        val thumb = thumbnailUrl ?: channel.thumbnailUrl ?: defaultThumb
+        binding.loadingThumbnailView.visibility = View.VISIBLE
+        Glide.with(this)
+            .load(thumb)
+            .apply(RequestOptions.bitmapTransform(BlurTransformation(25, 4)))
+            .placeholder(ColorDrawable(Color.BLACK))
+            .error(Glide.with(this).load(defaultThumb).apply(RequestOptions.bitmapTransform(BlurTransformation(25, 4))))
+            .into(binding.loadingThumbnailView)
+
+        binding.channelName.text = channel.username
+        binding.channelNumber.text = "VOD"
+        binding.streamTitle.text = vodTitle
+        binding.viewerCount.text = formatViewerCount(views)
+        binding.viewerIcon.visibility = View.VISIBLE
+        binding.viewerCount.visibility = View.VISIBLE
+        binding.categoryName.text = categoryName ?: "VOD"
+        binding.categoryName.visibility = View.VISIBLE
+        binding.qualityBadge.visibility = View.VISIBLE
+        binding.qualityBadge.text = "AUTO"
+        binding.fpsBadge.visibility = View.GONE
+        binding.tagContainer.removeAllViews()
+        binding.tagContainer.visibility = View.GONE
+
+        val themeColor = prefs.themeColor
+        binding.vodTransportContainer.visibility = View.VISIBLE
+        binding.vodStateBadge.backgroundTintList = ColorStateList.valueOf(themeColor)
+        binding.vodScrubDeltaBadge.setTextColor(themeColor)
+        binding.vodSeekProgressBar.progressTintList = ColorStateList.valueOf(themeColor)
+        binding.vodPositionText.text = "00:00"
+        binding.vodDurationText.text = "00:00"
+        binding.vodSeekProgressBar.progress = 0
+        binding.vodSeekProgressBar.secondaryProgress = 0
+        binding.vodScrubDeltaBadge.visibility = View.GONE
+
+        Glide.with(this)
+            .load(channel.getEffectiveProfilePicUrl())
+            .circleCrop()
+            .into(binding.profileImage)
+
+        binding.channelName.isSelected = true
+        binding.streamTitle.isSelected = true
+        binding.categoryName.isSelected = true
+
+        updateDrawerUserInfo()
+        showInfoOverlay()
+    }
+
+    internal fun ensureChatVisibleForVod() {
+        applyChatPanelLayoutAndStyle()
+        if (!isChatVisible) {
+            showChat()
+        }
+    }
+
+    internal fun onVodSeekbarUpdated(
+        positionMs: Long,
+        durationMs: Long,
+        bufferedMs: Long,
+        isPlaying: Boolean,
+        scrubPreviewPosMs: Long?,
+        scrubDeltaMs: Long
+    ) {
+        if (!tvVodManager.isVodMode) return
+        binding.vodTransportContainer.visibility = View.VISIBLE
+        binding.vodStateBadge.text = if (isPlaying) "▶ VOD" else "⏸ PAUSED"
+
+        if (scrubPreviewPosMs != null) {
+            val sign = if (scrubDeltaMs >= 0L) "+" else "-"
+            binding.vodScrubDeltaBadge.text = "$sign${TvVodManager.formatDurationMs(abs(scrubDeltaMs))}"
+            binding.vodScrubDeltaBadge.visibility = View.VISIBLE
+        } else {
+            binding.vodScrubDeltaBadge.visibility = View.GONE
+        }
+
+        val displayPos = scrubPreviewPosMs ?: positionMs
+        val posFormatted = TvVodManager.formatDurationMs(displayPos)
+        val durFormatted = TvVodManager.formatDurationMs(durationMs)
+        binding.vodPositionText.text = posFormatted
+        binding.vodDurationText.text = durFormatted
+
+        if (durationMs > 0L) {
+            val progressPermille = ((displayPos * 1000L) / durationMs).toInt().coerceIn(0, 1000)
+            val bufferedPermille = ((bufferedMs * 1000L) / durationMs).toInt().coerceIn(0, 1000)
+            binding.vodSeekProgressBar.progress = progressPermille
+            binding.vodSeekProgressBar.secondaryProgress = bufferedPermille
+            binding.streamTimeBadge.text = "$posFormatted / $durFormatted"
+            binding.streamTimeBadge.visibility = View.VISIBLE
+        }
+    }
+
+    internal fun appendVodChatMessages(
+        messages: List<ChatMessage>,
+        @Suppress("UNUSED_PARAMETER") smoothScroll: Boolean
+    ) {
+        if (messages.isEmpty()) return
+        chatAdapter?.addMessages(messages, deduplicate = true, animate = false) {
+            val count = chatAdapter?.itemCount ?: 0
+            if (count > 0) {
+                binding.chatRecyclerView.scrollToPosition(count - 1)
+            }
+        }
+    }
+
+    internal fun exitVodToLive() {
+        tvVodManager.stopVodPlayback(restoreLiveFlags = true)
+        binding.vodTransportContainer.visibility = View.GONE
+        updateDrawerUserInfo()
+        startRefreshTimer()
+        if (allChannels.isNotEmpty()) {
+            playCurrentChannel(useZapDelay = false, showInfo = true)
+        } else {
+            loadInitialChannels()
+        }
+    }
+
+    private fun applyChatPanelLayoutAndStyle() {
+        val density = resources.displayMetrics.density
+        val overlayMode = prefs.tvChatOverlayMode
+        val compactCorner = overlayMode && prefs.tvChatOverlayCompactHeight
+        val opacityPct = prefs.tvChatOverlayOpacity.coerceIn(0, 90)
+
+        val chatLp = (binding.chatPanel.layoutParams as? FrameLayout.LayoutParams)
+            ?: FrameLayout.LayoutParams((320f * density).toInt(), ViewGroup.LayoutParams.MATCH_PARENT, Gravity.END)
+        chatLp.width = (320f * density).toInt()
+        if (compactCorner) {
+            val screenH = resources.displayMetrics.heightPixels.takeIf { it > 0 } ?: (540f * density).toInt()
+            chatLp.height = (screenH * 0.58f).toInt()
+            chatLp.gravity = Gravity.BOTTOM or Gravity.END
+            chatLp.bottomMargin = (20f * density).toInt()
+            chatLp.marginEnd = (12f * density).toInt()
+        } else {
+            chatLp.height = ViewGroup.LayoutParams.MATCH_PARENT
+            chatLp.gravity = Gravity.END
+            chatLp.bottomMargin = 0
+            chatLp.marginEnd = 0
+        }
+        binding.chatPanel.layoutParams = chatLp
+
+        if (overlayMode) {
+            if (opacityPct <= 0) {
+                binding.chatPanel.background = ColorDrawable(Color.TRANSPARENT)
+            } else {
+                val alpha = ((opacityPct / 100f) * 255f).toInt().coerceIn(0, 235)
+                val gd = GradientDrawable()
+                gd.setColor(Color.argb(alpha, 8, 10, 14))
+                if (compactCorner) {
+                    gd.cornerRadius = 16f * density
+                }
+                binding.chatPanel.background = gd
+            }
+        } else {
+            binding.chatPanel.setBackgroundResource(R.drawable.chat_panel_background)
+        }
+
+        val playerLp = binding.playerContainer.layoutParams as FrameLayout.LayoutParams
+        val desiredMarginEnd = if (!isChatVisible || overlayMode) 0 else (320f * density).toInt()
+        if (playerLp.marginEnd != desiredMarginEnd) {
+            playerLp.marginEnd = desiredMarginEnd
+            binding.playerContainer.layoutParams = playerLp
+        }
+
+        chatAdapter?.setOverlayShadowEnabled(overlayMode)
+        chatAdapter?.setChatTextSize(prefs.chatTextSize)
+        if (tvVodManager.isVodMode) {
+            chatAdapter?.setShowTimestamps(prefs.tvVodShowOffsetTimestamps)
+        } else {
+            chatAdapter?.setShowTimestamps(prefs.chatShowTimestamps)
+        }
+    }
+
+    private fun currentChatOverlayShortLabel(): String {
+        if (!isChatVisible) return "Chat: Off"
+        if (!prefs.tvChatOverlayMode) return "Side Panel"
+        if (prefs.tvChatOverlayCompactHeight) return "Corner ${prefs.tvChatOverlayOpacity}%"
+        if (prefs.tvChatOverlayOpacity <= 0) return "Floating 0%"
+        return "Overlay ${prefs.tvChatOverlayOpacity}%"
+    }
+
+    private fun cycleTvChatOverlayPreset() {
+        val label: String
+        when {
+            !isChatVisible -> {
+                prefs.tvChatOverlayMode = true
+                prefs.tvChatOverlayCompactHeight = false
+                prefs.tvChatOverlayOpacity = 35
+                showChat()
+                label = "Chat Overlay: 35% Scrim"
+            }
+            prefs.tvChatOverlayMode && !prefs.tvChatOverlayCompactHeight && prefs.tvChatOverlayOpacity > 0 -> {
+                prefs.tvChatOverlayMode = true
+                prefs.tvChatOverlayCompactHeight = false
+                prefs.tvChatOverlayOpacity = 0
+                applyChatPanelLayoutAndStyle()
+                label = "Chat Overlay: 0% Floating Text"
+            }
+            prefs.tvChatOverlayMode && !prefs.tvChatOverlayCompactHeight && prefs.tvChatOverlayOpacity <= 0 -> {
+                prefs.tvChatOverlayMode = true
+                prefs.tvChatOverlayCompactHeight = true
+                prefs.tvChatOverlayOpacity = 35
+                applyChatPanelLayoutAndStyle()
+                label = "Chat Overlay: Bottom-Right Corner"
+            }
+            prefs.tvChatOverlayMode && prefs.tvChatOverlayCompactHeight -> {
+                prefs.tvChatOverlayMode = false
+                prefs.tvChatOverlayCompactHeight = false
+                applyChatPanelLayoutAndStyle()
+                label = "Chat Mode: Side-by-Side Panel"
+            }
+            else -> {
+                hideChat()
+                label = "Chat Hidden (Press ▲ in VOD or ▶ in Live to show)"
+            }
+        }
+        binding.txtChatOverlayQuick.text = currentChatOverlayShortLabel()
+        Toast.makeText(this, label, Toast.LENGTH_SHORT).show()
+    }
+
+    private fun showChannelVodsSidebar(slugOverride: String? = null) {
+        val rawSlug = slugOverride
+            ?: (if (tvVodManager.isVodMode) tvVodManager.currentChannel?.slug else allChannels.getOrNull(currentChannelIndex)?.slug)
+            ?: prefs.tvDefaultChannelSlug
+        val slug = rawSlug.trim().lowercase().ifEmpty { prefs.tvDefaultChannelSlug }
+        val favSlug = prefs.tvDefaultChannelSlug.trim().lowercase().ifEmpty { "zee" }
+        val favLabel = favSlug.replaceFirstChar { if (it.isLowerCase()) it.titlecase(Locale.US) else it.toString() }
+
+        binding.sidebarLoadingBar.visibility = View.VISIBLE
+        val loadingItems = listOf(
+            SelectionItem("loading_vods", "Loading $slug's VOD broadcasts...")
+        )
+        showSidebar("VODs • $slug", loadingItems, "vods", animate = sidebarContext != "vods") { }
+
+        lifecycleScope.launch {
+            val detailsResult = repository.getChannelDetails(slug)
+            val videosResult = repository.getChannelVideos(slug)
+            binding.sidebarLoadingBar.visibility = View.GONE
+
+            // Only update sidebar if user hasn't closed or switched away from the VODs sidebar
+            if (currentState != MenuState.SIDEBAR || sidebarContext != "vods") return@launch
+
+            val detail = detailsResult.getOrNull()
+            val fallbackChannel = tvVodManager.currentChannel?.takeIf { it.slug.equals(slug, ignoreCase = true) }
+                ?: allChannels.firstOrNull { it.slug.equals(slug, ignoreCase = true) }
+
+            val channelItem = when {
+                detail != null -> ChannelItem.fromChannelDetailResponse(detail)
+                fallbackChannel != null -> fallbackChannel
+                else -> ChannelItem(
+                    id = "0",
+                    slug = slug,
+                    username = slug,
+                    title = null,
+                    viewerCount = 0,
+                    thumbnailUrl = null,
+                    profilePicUrl = null,
+                    playbackUrl = null,
+                    categoryName = null
+                )
+            }
+
+            val items = mutableListOf<SelectionItem>()
+            if (!slug.equals(favSlug, ignoreCase = true)) {
+                items.add(SelectionItem("quick_fav_latest", "★ Play $favLabel's Latest VOD"))
+                items.add(SelectionItem("browse_fav_vods", "Browse $favLabel's VOD Archive →"))
+            }
+
+            videosResult.onSuccess { videos ->
+                if (videos.isEmpty()) {
+                    items.add(SelectionItem("empty_vods", "No past VOD broadcasts found for ${channelItem.username}"))
+                } else {
+                    videos.forEachIndexed { idx, v ->
+                        val vidKey = v.uuid ?: v.id.toString()
+                        val saved = prefs.getVodProgress(vidKey)
+                        val durStr = TvVodManager.formatDurationMs(v.duration ?: 0L)
+                        val rawDate = (v.startTime ?: v.createdAt ?: v.video?.createdAt ?: "").take(10)
+                        val datePart = if (rawDate.isNotEmpty()) " • $rawDate" else ""
+                        val titleText = v.sessionTitle ?: "VOD Broadcast"
+                        val latestBadge = if (idx == 0) "★ LATEST • " else ""
+                        val resumeBadge = if (saved != null && saved.watchedDuration > 15_000L) {
+                            "  [Resume ${TvVodManager.formatDurationMs(saved.watchedDuration)}]"
+                        } else {
+                            ""
+                        }
+                        val isPlayingThis = tvVodManager.isVodMode &&
+                            !v.uuid.isNullOrBlank() &&
+                            tvVodManager.currentVideo?.uuid == v.uuid
+
+                        items.add(
+                            SelectionItem(
+                                id = "play_$vidKey",
+                                title = "$latestBadge[$durStr] $titleText$datePart$resumeBadge",
+                                isSelected = isPlayingThis,
+                                payload = v
+                            )
+                        )
+                        if (saved != null && saved.watchedDuration > 15_000L) {
+                            items.add(
+                                SelectionItem(
+                                    id = "restart_$vidKey",
+                                    title = "   ↺ Start from 00:00 — $titleText",
+                                    isSelected = false,
+                                    payload = v
+                                )
+                            )
+                        }
+                    }
+                }
+            }.onFailure {
+                items.add(SelectionItem("err_vods", "Failed to load VODs for $slug (Tap to retry)"))
+            }
+
+            items.add(SelectionItem("search_channel", "Search Another Streamer's Channel / VODs..."))
+
+            val firstVodFocus = items.firstOrNull { it.isSelected }?.id
+                ?: items.firstOrNull { it.id.startsWith("play_") }?.id
+                ?: items.firstOrNull()?.id
+
+            showSidebar(
+                title = "VODs • ${channelItem.username}",
+                items = items,
+                context = "vods",
+                animate = false,
+                initialFocusId = firstVodFocus
+            ) { selected ->
+                when {
+                    selected.id == "quick_fav_latest" -> {
+                        hideAllOverlays()
+                        tvVodManager.playChannelLatestVod(favSlug)
+                    }
+                    selected.id == "browse_fav_vods" -> {
+                        showChannelVodsSidebar(favSlug)
+                    }
+                    selected.id == "err_vods" -> {
+                        showChannelVodsSidebar(slug)
+                    }
+                    selected.id == "search_channel" -> {
+                        showSearchPanel()
+                    }
+                    selected.id.startsWith("restart_") -> {
+                        val v = selected.payload as? ListChannelVideo ?: return@showSidebar
+                        val ch = if (channelItem.id == "0" && (v.channelId ?: v.channel?.id) != null) {
+                            channelItem.copy(id = (v.channelId ?: v.channel?.id ?: 0L).toString())
+                        } else {
+                            channelItem
+                        }
+                        hideAllOverlays()
+                        tvVodManager.playListVideo(v, ch, forceFromStart = true, explicitStartPositionMs = 0L)
+                    }
+                    selected.id.startsWith("play_") -> {
+                        val v = selected.payload as? ListChannelVideo ?: return@showSidebar
+                        val ch = if (channelItem.id == "0" && (v.channelId ?: v.channel?.id) != null) {
+                            channelItem.copy(id = (v.channelId ?: v.channel?.id ?: 0L).toString())
+                        } else {
+                            channelItem
+                        }
+                        hideAllOverlays()
+                        tvVodManager.playListVideo(v, ch)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun showVodAndOverlaySettings(keepFocusId: String? = null) {
+        val favSlug = prefs.tvDefaultChannelSlug
+        val favLabel = favSlug.replaceFirstChar { if (it.isLowerCase()) it.titlecase(Locale.US) else it.toString() }
+        val modeLabel = if (prefs.tvChatOverlayMode) "Overlay on Fullscreen Video" else "Side-by-Side (Shrink Video)"
+        val opacityLabel = if (prefs.tvChatOverlayOpacity <= 0) "0% (Floating Text)" else "${prefs.tvChatOverlayOpacity}%"
+        val heightLabel = if (prefs.tvChatOverlayCompactHeight) "Bottom-Right Corner (58%)" else "Full Right Edge (100%)"
+        val fontSizeSp = prefs.chatTextSize.toInt()
+
+        val items = listOf(
+            SelectionItem("play_fav_vod", "★ Play $favLabel's Latest VOD Now"),
+            SelectionItem("overlay_mode", "Chat Layout: $modeLabel"),
+            SelectionItem("overlay_opacity", "Overlay Scrim Opacity: $opacityLabel"),
+            SelectionItem("overlay_height", "Overlay Area: $heightLabel"),
+            SelectionItem("chat_font", "Chat Font Size: ${fontSizeSp}sp"),
+            SelectionItem(
+                "hide_bots",
+                "Hide Chat Bots in VODs (BotRix, KickBot, Nightbot)",
+                isSelected = prefs.tvVodHideBots,
+                showCheckbox = true
+            ),
+            SelectionItem(
+                "vod_timestamps",
+                "Show Relative VOD Timestamps (MM:SS)",
+                isSelected = prefs.tvVodShowOffsetTimestamps,
+                showCheckbox = true
+            ),
+            SelectionItem(
+                "startup_vod",
+                "Auto-Play $favLabel's Latest VOD on App Startup",
+                isSelected = prefs.tvAutoPlayLatestVodOnStartup,
+                showCheckbox = true
+            )
+        )
+
+        showSidebar(
+            title = "Chat Overlay & VODs",
+            items = items,
+            context = "settings_sub",
+            animate = sidebarContext != "settings_sub",
+            initialFocusId = keepFocusId ?: lastSubSettingsFocusId
+        ) { item ->
+            lastSubSettingsFocusId = item.id
+            when (item.id) {
+                "play_fav_vod" -> {
+                    hideAllOverlays()
+                    tvVodManager.playChannelLatestVod(favSlug)
+                }
+                "overlay_mode" -> {
+                    prefs.tvChatOverlayMode = !prefs.tvChatOverlayMode
+                    applyChatPanelLayoutAndStyle()
+                    showVodAndOverlaySettings("overlay_mode")
+                }
+                "overlay_opacity" -> {
+                    showVodOpacitySubmenu()
+                }
+                "overlay_height" -> {
+                    prefs.tvChatOverlayCompactHeight = !prefs.tvChatOverlayCompactHeight
+                    if (prefs.tvChatOverlayCompactHeight) {
+                        prefs.tvChatOverlayMode = true
+                    }
+                    applyChatPanelLayoutAndStyle()
+                    showVodAndOverlaySettings("overlay_height")
+                }
+                "chat_font" -> {
+                    showVodFontSizeSubmenu()
+                }
+                "hide_bots" -> {
+                    prefs.tvVodHideBots = !prefs.tvVodHideBots
+                    showVodAndOverlaySettings("hide_bots")
+                }
+                "vod_timestamps" -> {
+                    prefs.tvVodShowOffsetTimestamps = !prefs.tvVodShowOffsetTimestamps
+                    applyChatPanelLayoutAndStyle()
+                    showVodAndOverlaySettings("vod_timestamps")
+                }
+                "startup_vod" -> {
+                    prefs.tvAutoPlayLatestVodOnStartup = !prefs.tvAutoPlayLatestVodOnStartup
+                    showVodAndOverlaySettings("startup_vod")
+                }
+            }
+        }
+    }
+
+    private fun showVodOpacitySubmenu() {
+        val current = prefs.tvChatOverlayOpacity
+        val options = listOf(
+            0 to "0% — Pure Floating Text (Shadow Only)",
+            20 to "20% — Ultra Subtle Scrim",
+            35 to "35% — Balanced Theatre Scrim (Default)",
+            55 to "55% — High Contrast Scrim",
+            75 to "75% — Dark Scrim"
+        )
+        val items = options.map { (pct, label) ->
+            SelectionItem(pct.toString(), label, isSelected = current == pct, payload = pct)
+        }
+        showSidebar(
+            title = "Overlay Scrim Opacity",
+            items = items,
+            context = "settings_vod_sub",
+            animate = true,
+            initialFocusId = items.find { it.isSelected }?.id
+        ) { selected ->
+            val pct = selected.payload as? Int ?: 35
+            prefs.tvChatOverlayOpacity = pct
+            prefs.tvChatOverlayMode = true
+            applyChatPanelLayoutAndStyle()
+            (binding.sidebarRecyclerView.adapter as? GenericSelectionAdapter)?.updateSingleSelection(selected.id)
+        }
+    }
+
+    private fun showVodFontSizeSubmenu() {
+        val current = prefs.chatTextSize.toInt()
+        val options = listOf(
+            12 to "Small (12sp)",
+            14 to "Medium (14sp — Default)",
+            16 to "Large (16sp — Recommended for 10ft TV)",
+            18 to "Extra Large (18sp)"
+        )
+        val items = options.map { (sp, label) ->
+            SelectionItem(sp.toString(), label, isSelected = current == sp, payload = sp)
+        }
+        showSidebar(
+            title = "Chat Font Size",
+            items = items,
+            context = "settings_vod_sub",
+            animate = true,
+            initialFocusId = items.find { it.isSelected }?.id
+        ) { selected ->
+            val sp = selected.payload as? Int ?: 14
+            prefs.chatTextSize = sp.toFloat()
+            applyChatPanelLayoutAndStyle()
+            (binding.sidebarRecyclerView.adapter as? GenericSelectionAdapter)?.updateSingleSelection(selected.id)
         }
     }
 }

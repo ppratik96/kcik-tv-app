@@ -1,12 +1,20 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <!-- App -->
-    <string name="app_name">KCIKTV</string>
-    <string name="app_name_caps">KCIKTV</string>
-    <string name="developer_name">Alperen Çetin (xacnio)</string>
-    <string name="url_repo">https://github.com/xacnio/kcik-tv-app</string>
-    <string name="url_github">https://github.com/xacnio</string>
-    <string name="url_coffee">https://www.buymeacoffee.com/xacnio</string>
+    <string name="app_name">KickTV</string>
+    <string name="app_name_caps">KICKTV</string>
+    <string name="developer_name">Pratik Patel (fork of xacnio/kcik-tv-app)</string>
+    <string name="url_repo">https://github.com/ppratik96/kcik-tv-app</string>
+    <string name="url_github">https://github.com/ppratik96</string>
+    <string name="url_coffee">https://pratikpa.tel</string>
+
+    <!-- TV VOD & Chat Overlay -->
+    <string name="tv_quick_vods">VODs</string>
+    <string name="tv_quick_chat_style">Chat Overlay</string>
+    <string name="tv_quick_back_to_live">Live</string>
+    <string name="tv_drawer_zee_latest_vod">Zee — Latest VOD</string>
+    <string name="tv_drawer_channel_vods">Channel VODs</string>
+    <string name="tv_vod_controls_hint">◀ / ▶ Seek   •   OK Play/Pause   •   ▲ Chat   •   ▼ Menu</string>
 
     <!-- Player Stats -->
     <string name="stat_fps">FPS</string>

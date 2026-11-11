@@ -20,16 +20,29 @@ fun getGitHash(): String {
     }
 }
 
+fun getGitCommitCount(): Int {
+    return try {
+        val stdout = ByteArrayOutputStream()
+        project.exec {
+            commandLine("git", "rev-list", "--count", "HEAD")
+            standardOutput = stdout
+        }
+        stdout.toString().trim().toIntOrNull() ?: 18
+    } catch (e: Exception) {
+        18
+    }
+}
+
 android {
     namespace = "dev.xacnio.kciktv"
     compileSdk = 34
 
     defaultConfig {
-        applicationId = "dev.xacnio.kciktv"
+        applicationId = "tel.pratikpa.kicktv"
         minSdk = 23
         targetSdk = 34
-        versionCode = 17
-        val baseVersion = "2.4.5-beta"
+        versionCode = 100 + getGitCommitCount()
+        val baseVersion = "3.0.0"
         versionName = "$baseVersion-${getGitHash()}"
 
         // Native RNNoise noise-suppression library (see src/main/cpp).
@@ -62,6 +75,16 @@ android {
         }
     }
 
+    signingConfigs {
+        create("release") {
+            storeFile = file("kicktv-release.p12")
+            storePassword = System.getenv("KEY_STORE_PASSWORD") ?: "kicktv2026"
+            keyAlias = System.getenv("KEY_ALIAS") ?: "kicktv"
+            keyPassword = System.getenv("KEY_PASSWORD") ?: "kicktv2026"
+            storeType = "PKCS12"
+        }
+    }
+
     buildTypes {
         release {
             // R8 minify + resource shrink: removes unused code + unreferenced resources.
@@ -69,6 +92,7 @@ android {
             // startup, lower steady-state RAM. proguard-rules.pro covers IVS Player,
             // Gson model reflection, Glide AppGlideModule, Parcelize CREATORs, JNI
             // entry points, and WebView @JavascriptInterface methods.
+            signingConfig = signingConfigs.getByName("release")
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(
@@ -79,8 +103,8 @@ android {
         debug {
             applicationIdSuffix = ".debug"
             versionNameSuffix = "-debug"
-            resValue("string", "app_name", "KCIKTV-TEST")
-            resValue("string", "app_name_caps", "KCIKTV-TEST")
+            resValue("string", "app_name", "KickTV-DEV")
+            resValue("string", "app_name_caps", "KICKTV-DEV")
         }
     }
     

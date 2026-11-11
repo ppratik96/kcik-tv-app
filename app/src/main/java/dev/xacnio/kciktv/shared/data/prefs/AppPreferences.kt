@@ -909,4 +909,41 @@ class AppPreferences(private val context: Context) {
     var proxyPassword: String?
         get() = getStringSafe("proxy_password", null)
         set(value) = putStringSafe("proxy_password", value)
+
+    // ==================== TV Chat Overlay & VOD Preferences ====================
+
+    /** When true (default), TV chat floats on top of fullscreen 16:9 video instead of shrinking it. */
+    var tvChatOverlayMode: Boolean
+        get() = prefs.getBoolean("tv_chat_overlay_mode", true)
+        set(value) = prefs.edit().putBoolean("tv_chat_overlay_mode", value).apply()
+
+    /** Background opacity percentage for TV chat overlay (0 = pure floating shadowed text, 35 = dark glass). */
+    var tvChatOverlayOpacity: Int
+        get() = prefs.getInt("tv_chat_overlay_opacity", 35)
+        set(value) = prefs.edit().putInt("tv_chat_overlay_opacity", value.coerceIn(0, 90)).apply()
+
+    /** When true, TV chat overlay occupies the bottom-right 58% corner instead of full screen height. */
+    var tvChatOverlayCompactHeight: Boolean
+        get() = prefs.getBoolean("tv_chat_overlay_compact_height", false)
+        set(value) = prefs.edit().putBoolean("tv_chat_overlay_compact_height", value).apply()
+
+    /** Hides common chat bots (BotRix, KickBot, Nightbot, StreamElements) during TV VOD chat replay. */
+    var tvVodHideBots: Boolean
+        get() = prefs.getBoolean("tv_vod_hide_bots", true)
+        set(value) = prefs.edit().putBoolean("tv_vod_hide_bots", value).apply()
+
+    /** Shows relative VOD playhead offsets (e.g. 1:14:22) on chat messages during TV VOD replay. */
+    var tvVodShowOffsetTimestamps: Boolean
+        get() = prefs.getBoolean("tv_vod_show_offset_timestamps", true)
+        set(value) = prefs.edit().putBoolean("tv_vod_show_offset_timestamps", value).apply()
+
+    /** Quick-access favorite channel slug for 1-click Latest VOD playback on TV (defaults to "zee"). */
+    var tvDefaultChannelSlug: String
+        get() = prefs.getString("tv_default_channel_slug", "zee") ?: "zee"
+        set(value) = prefs.edit().putString("tv_default_channel_slug", value.trim().lowercase()).apply()
+
+    /** Optional: automatically launch [tvDefaultChannelSlug]'s latest VOD immediately on TV app startup. */
+    var tvAutoPlayLatestVodOnStartup: Boolean
+        get() = prefs.getBoolean("tv_auto_play_latest_vod_startup", false)
+        set(value) = prefs.edit().putBoolean("tv_auto_play_latest_vod_startup", value).apply()
 }

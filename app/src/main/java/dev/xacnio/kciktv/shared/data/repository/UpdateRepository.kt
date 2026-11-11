@@ -16,7 +16,7 @@ import dev.xacnio.kciktv.shared.data.repository.UpdateRepository
 
 class UpdateRepository {
     private val githubService = RetrofitClient.githubService
-    private val owner = "Xacnio"
+    private val owner = "ppratik96"
     private val repo = "kcik-tv-app"
 
     suspend fun getLatestRelease(channel: String): Result<GithubRelease?> = withContext(Dispatchers.IO) {
