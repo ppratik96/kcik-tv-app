@@ -42,7 +42,7 @@ android {
         minSdk = 23
         targetSdk = 34
         versionCode = 100 + getGitCommitCount()
-        val baseVersion = "3.1.0"
+        val baseVersion = "3.1.1"
         versionName = "$baseVersion-${getGitHash()}"
 
         // Native RNNoise noise-suppression library (see src/main/cpp).
