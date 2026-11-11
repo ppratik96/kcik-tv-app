@@ -27,6 +27,9 @@ import dev.xacnio.kciktv.shared.util.DateParseUtils
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -51,7 +54,7 @@ class TvVodManager(
         private const val TAG = "TvVodManager"
         private const val SYNC_TICK_MS = 250L
         private const val LOOKAHEAD_WINDOW_MS = 60_000L
-        private const val SEEK_JUMP_THRESHOLD_MS = 2_500L
+        private const val SEEK_JUMP_THRESHOLD_MS = 6_500L
         private const val SCRUB_COMMIT_DELAY_MS = 420L
 
         private val KNOWN_BOT_NAMES = setOf(
@@ -83,6 +86,9 @@ class TvVodManager(
     }
 
     var isVodMode: Boolean = false
+        private set
+
+    var isLiveDvrChatSyncActive: Boolean = false
         private set
 
     var currentVideo: ChannelVideo? = null
@@ -126,10 +132,15 @@ class TvVodManager(
 
     private val syncTickRunnable = object : Runnable {
         override fun run() {
-            if (!isVodMode) return
-            onSyncTick()
-            if (isVodMode) {
-                mainHandler.postDelayed(this, SYNC_TICK_MS)
+            if (!isVodMode && !isLiveDvrChatSyncActive) return
+            try {
+                onSyncTick()
+            } catch (t: Throwable) {
+                Log.e(TAG, "Error in syncTickRunnable: ${t.message}", t)
+            } finally {
+                if (isVodMode || isLiveDvrChatSyncActive) {
+                    mainHandler.postDelayed(this, SYNC_TICK_MS)
+                }
             }
         }
     }
@@ -245,6 +256,7 @@ class TvVodManager(
         mainHandler.removeCallbacks(commitScrubRunnable)
 
         isVodMode = true
+        isLiveDvrChatSyncActive = false
         currentVideo = video
         currentChannel = channel
         vodStartTimeMillis = 0L
@@ -377,7 +389,6 @@ class TvVodManager(
 
                 vodChannelId = numericChannelId
                 vodStartTimeMillis = startEpochMs
-                bufferedUntilEpochMs = startEpochMs + resumeMs
 
                 Log.d(
                     TAG,
@@ -386,6 +397,11 @@ class TvVodManager(
 
                 withContext(Dispatchers.Main) {
                     if (gen != syncGeneration.get() || !isVodMode) return@withContext
+                    val livePosMs = maxOf(resumeMs, activity.ivsPlayer?.position?.coerceAtLeast(0L) ?: 0L)
+                    lastSyncedPositionMs = livePosMs
+                    val lookbackPosMs = (livePosMs - 5_000L).coerceAtLeast(0L)
+                    bufferedUntilEpochMs = ((startEpochMs + lookbackPosMs) / 5_000L) * 5_000L
+
                     activity.chatAdapter?.apply {
                         isVodMode = true
                         setVodStartTimeMillis(this@TvVodManager.vodStartTimeMillis)
@@ -393,12 +409,12 @@ class TvVodManager(
                         clearMessages()
                     }
 
-                    // Populate initial backfill if resuming mid-VOD, and kick off 250ms sync loop
+                    // Populate initial backfill and kick off continuous 250ms sync loop
                     if (vodChannelId > 0L && vodStartTimeMillis > 0L) {
-                        if (resumeMs > 3_000L) {
-                            launchSeekBackfill(resumeMs, gen)
+                        if (livePosMs > 2_000L) {
+                            launchSeekBackfill(livePosMs, gen)
                         }
-                        checkAndTriggerLookahead(resumeMs, gen)
+                        checkAndTriggerLookahead(livePosMs, gen)
                     }
 
                     mainHandler.removeCallbacks(syncTickRunnable)
@@ -418,6 +434,7 @@ class TvVodManager(
         }
         syncGeneration.incrementAndGet()
         isVodMode = false
+        isLiveDvrChatSyncActive = false
         vodLoadJob?.cancel()
         vodFetchJob?.cancel()
         vodBackfillJob?.cancel()
@@ -448,6 +465,144 @@ class TvVodManager(
                 playbackRate = 1.0f
             }
         }
+    }
+
+    /**
+     * Synchronizes chat overlay with rewound Live DVR playback so rewinding/forwarding a live
+     * stream replays historical chat in lockstep with the rewound broadcast timestamp.
+     */
+    fun startLiveDvrChatSync(
+        channel: ChannelItem,
+        dvrPlaybackUrl: String,
+        fallbackStartEpochMs: Long?,
+        initialPositionMs: Long
+    ) {
+        if (isVodMode) return
+
+        val gen = syncGeneration.incrementAndGet()
+        vodLoadJob?.cancel()
+        vodFetchJob?.cancel()
+        vodBackfillJob?.cancel()
+        mainHandler.removeCallbacks(syncTickRunnable)
+
+        isLiveDvrChatSyncActive = true
+        currentChannel = channel
+        vodStartTimeMillis = 0L
+        vodChannelId = channel.id.toLongOrNull() ?: 0L
+        pendingScrubTargetMs = null
+        lastSyncedPositionMs = -1L
+        bufferedUntilEpochMs = 0L
+        isFetchingLookahead = false
+        fetchedMessageIds.clear()
+        shownMessageIds.clear()
+        chatBucketsBySecond.clear()
+
+        vodLoadJob = activity.lifecycleScope.launch {
+            try {
+                var numericChannelId = vodChannelId
+                if (numericChannelId <= 0L && channel.slug.isNotBlank()) {
+                    repository.getChannelDetails(channel.slug).onSuccess { details ->
+                        details.id?.let { numericChannelId = it }
+                    }
+                }
+                if (channel.slug.isNotBlank()) {
+                    repository.getChatInfo(channel.slug, activity.prefs.authToken).onSuccess { chatInfo ->
+                        if (numericChannelId <= 0L && chatInfo.channelId > 0L) {
+                            numericChannelId = chatInfo.channelId
+                        }
+                        withContext(Dispatchers.Main) {
+                            if (gen == syncGeneration.get() && isLiveDvrChatSyncActive) {
+                                activity.chatAdapter?.setSubscriberBadges(chatInfo.subscriberBadges)
+                            }
+                        }
+                    }
+                }
+
+                var startEpochMs = fetchHlsProgramStartTimeMs(dvrPlaybackUrl) ?: 0L
+                if (startEpochMs <= 0L && fallbackStartEpochMs != null && fallbackStartEpochMs > 0L) {
+                    startEpochMs = fallbackStartEpochMs
+                }
+
+                if (gen != syncGeneration.get() || !isLiveDvrChatSyncActive) return@launch
+
+                vodChannelId = numericChannelId
+                vodStartTimeMillis = startEpochMs
+
+                withContext(Dispatchers.Main) {
+                    if (gen != syncGeneration.get() || !isLiveDvrChatSyncActive) return@withContext
+                    val posMs = activity.ivsPlayer?.position?.takeIf { it > 0L } ?: initialPositionMs.coerceAtLeast(0L)
+                    lastSyncedPositionMs = posMs
+                    val lookbackPosMs = (posMs - 5_000L).coerceAtLeast(0L)
+                    bufferedUntilEpochMs = ((startEpochMs + lookbackPosMs) / 5_000L) * 5_000L
+
+                    activity.chatAdapter?.apply {
+                        isVodMode = true
+                        setVodStartTimeMillis(startEpochMs)
+                        setShowTimestamps(activity.prefs.tvVodShowOffsetTimestamps)
+                        clearMessages()
+                    }
+
+                    if (vodChannelId > 0L && vodStartTimeMillis > 0L) {
+                        if (posMs > 2_000L) {
+                            launchSeekBackfill(posMs, gen)
+                        }
+                        checkAndTriggerLookahead(posMs, gen)
+                    }
+
+                    mainHandler.removeCallbacks(syncTickRunnable)
+                    mainHandler.post(syncTickRunnable)
+                }
+            } catch (ce: CancellationException) {
+                throw ce
+            } catch (e: Exception) {
+                Log.e(TAG, "Error starting Live DVR chat sync: ${e.message}", e)
+            }
+        }
+    }
+
+    fun onLiveDvrSeeked(targetPosMs: Long) {
+        if (!isLiveDvrChatSyncActive || isVodMode) return
+        lastSyncedPositionMs = targetPosMs
+        handleSeekResetAndBackfill(targetPosMs)
+    }
+
+    fun stopLiveDvrChatSync() {
+        if (!isLiveDvrChatSyncActive) return
+        syncGeneration.incrementAndGet()
+        isLiveDvrChatSyncActive = false
+        vodLoadJob?.cancel()
+        vodFetchJob?.cancel()
+        vodBackfillJob?.cancel()
+        mainHandler.removeCallbacks(syncTickRunnable)
+
+        lastSyncedPositionMs = -1L
+        vodStartTimeMillis = 0L
+        vodChannelId = 0L
+        isFetchingLookahead = false
+        fetchedMessageIds.clear()
+        shownMessageIds.clear()
+        chatBucketsBySecond.clear()
+
+        activity.chatAdapter?.apply {
+            isVodMode = false
+            setVodStartTimeMillis(0L)
+            setShowTimestamps(activity.prefs.chatShowTimestamps)
+            clearMessages()
+        }
+    }
+
+    fun onChatPanelShown() {
+        if (!isVodMode && !isLiveDvrChatSyncActive) return
+        val pos = activity.ivsPlayer?.position?.coerceAtLeast(0L) ?: 0L
+        val gen = syncGeneration.get()
+        if (vodChannelId > 0L && vodStartTimeMillis > 0L) {
+            if ((activity.chatAdapter?.itemCount ?: 0) == 0 && pos > 2_000L) {
+                launchSeekBackfill(pos, gen)
+            }
+            checkAndTriggerLookahead(pos, gen)
+        }
+        mainHandler.removeCallbacks(syncTickRunnable)
+        mainHandler.post(syncTickRunnable)
     }
 
     /**
@@ -549,33 +704,34 @@ class TvVodManager(
         val pos = player.position
         val dur = player.duration.takeIf { it > 0L } ?: (currentVideo?.duration ?: 0L)
 
-        // Apply initial resume seek as soon as IVS reports valid duration
-        if (pendingInitialSeekMs > 0L && dur > 0L && (state == Player.State.READY || state == Player.State.PLAYING)) {
-            val target = pendingInitialSeekMs.coerceAtMost((dur - 2_000L).coerceAtLeast(0L))
-            pendingInitialSeekMs = 0L
-            try {
-                player.seekTo(target)
-                lastSyncedPositionMs = target
-            } catch (e: Exception) {
-                Log.w(TAG, "Initial seek failed: ${e.message}")
+        if (isVodMode) {
+            // Apply initial resume seek as soon as IVS reports valid duration
+            if (pendingInitialSeekMs > 0L && dur > 0L && (state == Player.State.READY || state == Player.State.PLAYING)) {
+                val target = pendingInitialSeekMs.coerceAtMost((dur - 2_000L).coerceAtLeast(0L))
+                pendingInitialSeekMs = 0L
+                try {
+                    player.seekTo(target)
+                    lastSyncedPositionMs = target
+                } catch (e: Exception) {
+                    Log.w(TAG, "Initial seek failed: ${e.message}")
+                }
             }
-        }
 
-        val scrubPreview = pendingScrubTargetMs
-        activity.onVodSeekbarUpdated(
-            positionMs = pos.coerceAtLeast(0L),
-            durationMs = dur,
-            bufferedMs = player.bufferedPosition.coerceAtLeast(0L),
-            isPlaying = state == Player.State.PLAYING,
-            scrubPreviewPosMs = scrubPreview,
-            scrubDeltaMs = if (scrubPreview != null) scrubPreview - scrubBasePositionMs else 0L
-        )
+            val scrubPreview = pendingScrubTargetMs
+            activity.onVodSeekbarUpdated(
+                positionMs = pos.coerceAtLeast(0L),
+                durationMs = dur,
+                bufferedMs = player.bufferedPosition.coerceAtLeast(0L),
+                isPlaying = state == Player.State.PLAYING,
+                scrubPreviewPosMs = scrubPreview,
+                scrubDeltaMs = if (scrubPreview != null) scrubPreview - scrubBasePositionMs else 0L
+            )
+        }
 
         if (pos < 0L) return
 
-        // Persist watch progress every 5 seconds while playing
         val nowElapsed = android.os.SystemClock.elapsedRealtime()
-        if (state == Player.State.PLAYING && nowElapsed - lastProgressSaveElapsedMs >= 5_000L) {
+        if (isVodMode && state == Player.State.PLAYING && nowElapsed - lastProgressSaveElapsedMs >= 5_000L) {
             lastProgressSaveElapsedMs = nowElapsed
             if (dur > 0L && dur - pos < 15_000L) {
                 val videoKey = currentVideo?.uuid ?: currentVideo?.id?.toString()
@@ -586,10 +742,10 @@ class TvVodManager(
         }
 
         // Hold chat emission while user is actively scrubbing the seekbar
-        if (scrubPreview != null) return
+        if (pendingScrubTargetMs != null) return
         if (vodChannelId <= 0L || vodStartTimeMillis <= 0L) return
 
-        // Detect external/unexpected seek jumps (> 2.5s)
+        // Detect external/unexpected seek jumps (> 6.5s)
         if (lastSyncedPositionMs >= 0L && abs(pos - lastSyncedPositionMs) > SEEK_JUMP_THRESHOLD_MS) {
             Log.d(TAG, "Seek jump detected: $lastSyncedPositionMs -> $pos ms")
             lastSyncedPositionMs = pos
@@ -601,7 +757,7 @@ class TvVodManager(
         // Emit buffered chat messages whose timestamp has been reached by the video playhead
         val replayEpochMs = vodStartTimeMillis + pos
         val currentSec = pos / 1000L
-        val startScanSec = (currentSec - 5L).coerceAtLeast(0L)
+        val startScanSec = (currentSec - 25L).coerceAtLeast(0L)
         val endScanSec = currentSec + 1L
         val hideBots = activity.prefs.tvVodHideBots
 
@@ -627,9 +783,9 @@ class TvVodManager(
             activity.appendVodChatMessages(readyMessages, smoothScroll = true)
         }
 
-        // Periodically top up 60s lookahead buffer while playing or ready
-        if ((state == Player.State.PLAYING || state == Player.State.READY) &&
-            nowElapsed - lastLookaheadTriggerElapsedMs >= 1_500L
+        // Continuously top up 60s lookahead buffer while playing, ready, or buffering
+        if ((state == Player.State.PLAYING || state == Player.State.READY || state == Player.State.BUFFERING) &&
+            nowElapsed - lastLookaheadTriggerElapsedMs >= 1_200L
         ) {
             lastLookaheadTriggerElapsedMs = nowElapsed
             checkAndTriggerLookahead(pos, syncGeneration.get())
@@ -645,7 +801,8 @@ class TvVodManager(
         shownMessageIds.clear()
         fetchedMessageIds.clear()
         chatBucketsBySecond.clear()
-        bufferedUntilEpochMs = vodStartTimeMillis + targetPosMs
+        val lookbackPosMs = (targetPosMs - 5_000L).coerceAtLeast(0L)
+        bufferedUntilEpochMs = ((vodStartTimeMillis + lookbackPosMs) / 5_000L) * 5_000L
 
         activity.chatAdapter?.clearMessages()
 
@@ -666,7 +823,7 @@ class TvVodManager(
         vodBackfillJob = activity.lifecycleScope.launch {
             val targetEpochMs = startMs + atPosMs
             repository.getVodChatBackfill(chId, targetEpochMs, startMs).onSuccess { backfill ->
-                if (expectedGen != syncGeneration.get() || !isVodMode) return@onSuccess
+                if (expectedGen != syncGeneration.get() || (!isVodMode && !isLiveDvrChatSyncActive)) return@onSuccess
                 val hideBots = activity.prefs.tvVodHideBots
                 val filtered = backfill.filter { msg ->
                     val botBlocked = hideBots && isBotUsername(msg.sender.username)
@@ -682,7 +839,7 @@ class TvVodManager(
                 }
                 if (filtered.isNotEmpty()) {
                     withContext(Dispatchers.Main) {
-                        if (expectedGen == syncGeneration.get() && isVodMode) {
+                        if (expectedGen == syncGeneration.get() && (isVodMode || isLiveDvrChatSyncActive)) {
                             // Prepend/seed backfill before any newly streamed messages
                             val existing = activity.chatAdapter?.currentList?.toList() ?: emptyList()
                             if (existing.isEmpty()) {
@@ -703,12 +860,21 @@ class TvVodManager(
 
     private fun checkAndTriggerLookahead(currentPosMs: Long, expectedGen: Int) {
         if (isFetchingLookahead || vodChannelId <= 0L || vodStartTimeMillis <= 0L) return
-        val targetBufferEpochMs = vodStartTimeMillis + currentPosMs + LOOKAHEAD_WINDOW_MS
-        if (bufferedUntilEpochMs < targetBufferEpochMs) {
+        val maxSafeNowMs = System.currentTimeMillis() - 2_500L
+        val desiredBufferMs = vodStartTimeMillis + currentPosMs + LOOKAHEAD_WINDOW_MS
+        val isGrowingLiveStream = isLiveDvrChatSyncActive || currentVideo?.isLive == true
+        val targetBufferEpochMs = if (isGrowingLiveStream) minOf(desiredBufferMs, maxSafeNowMs) else desiredBufferMs
+        if (bufferedUntilEpochMs + 5_000L <= targetBufferEpochMs) {
             fetchLookaheadUntil(targetBufferEpochMs, expectedGen)
         }
     }
 
+    /**
+     * Fetches 5-second aligned chat windows (`[t, t+5000ms)`) in batches of up to 3 concurrent
+     * requests. IMPORTANT: Kick's `data.cursor` in `?start_time=` responses points 25 messages into
+     * the future (often 5–20 minutes ahead!), so we NEVER advance `bufferedUntilEpochMs` using
+     * `cursor` — we strictly step 5,000ms per verified 5s bucket so quiet periods never skip chat!
+     */
     private fun fetchLookaheadUntil(targetEpochMs: Long, expectedGen: Int) {
         val chId = vodChannelId
         val startMs = vodStartTimeMillis
@@ -720,22 +886,47 @@ class TvVodManager(
                 val isoFmt = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US).apply {
                     timeZone = TimeZone.getTimeZone("UTC")
                 }
-                var nextFetchMs = bufferedUntilEpochMs.coerceAtLeast(startMs)
+                var nextBucketMs = ((bufferedUntilEpochMs.coerceAtLeast(startMs)) / 5_000L) * 5_000L
 
-                while (isActive && expectedGen == syncGeneration.get() && isVodMode && bufferedUntilEpochMs < targetEpochMs) {
-                    val startIso = isoFmt.format(Date(nextFetchMs))
-                    val result = repository.getChatHistoryForVod(chId, startIso)
+                while (
+                    isActive &&
+                    expectedGen == syncGeneration.get() &&
+                    (isVodMode || isLiveDvrChatSyncActive) &&
+                    nextBucketMs < targetEpochMs
+                ) {
+                    val bucketStarts = ArrayList<Long>(3)
+                    var probe = nextBucketMs
+                    while (bucketStarts.size < 3 && probe < targetEpochMs) {
+                        bucketStarts.add(probe)
+                        probe += 5_000L
+                    }
+                    if (bucketStarts.isEmpty()) break
 
-                    var shouldContinue = false
-                    result.onSuccess { chatResult ->
-                        if (expectedGen != syncGeneration.get() || !isVodMode) return@onSuccess
+                    val batchResults = coroutineScope {
+                        bucketStarts.map { bStart ->
+                            val iso = synchronized(isoFmt) { isoFmt.format(Date(bStart)) }
+                            async {
+                                bStart to repository.getChatHistoryForVod(chId, iso)
+                            }
+                        }.awaitAll()
+                    }
 
-                        val messages = chatResult.messages
+                    if (expectedGen != syncGeneration.get() || (!isVodMode && !isLiveDvrChatSyncActive)) break
+
+                    var hitFailure = false
+                    for ((bStart, result) in batchResults) {
+                        if (result.isFailure) {
+                            Log.w(TAG, "VOD 5s bucket fetch failed at $bStart: ${result.exceptionOrNull()?.message}")
+                            hitFailure = true
+                            break
+                        }
+
+                        val messages = result.getOrNull()?.messages ?: emptyList()
                         val newMessages = messages.filter { !fetchedMessageIds.contains(it.id) }
 
                         if (newMessages.isNotEmpty()) {
-                            // Group messages sharing identical whole-second timestamps so bursts without
-                            // message_ref spread smoothly across 0..850ms instead of clumping on .000s
+                            // Spread messages sharing identical whole-second timestamps across 0..850ms
+                            // so rapid chat bursts flow organically at 4fps rather than clumping on .000s
                             val byCreatedMs = newMessages.groupBy { it.createdAt }
                             for ((tsMs, group) in byCreatedMs) {
                                 val hasExactSubSecond = (tsMs % 1000L) != 0L
@@ -754,28 +945,15 @@ class TvVodManager(
                                     }.add(adjusted)
                                 }
                             }
-
-                            val maxCreated = messages.maxOf { it.createdAt }
-                            // Kick's ?start_time= returns a 5-second window; advance past max(windowEnd, maxCreated)
-                            val advancedMs = maxOf(nextFetchMs + 5_000L, maxCreated + 1L)
-                            nextFetchMs = advancedMs
-                            bufferedUntilEpochMs = maxOf(bufferedUntilEpochMs, advancedMs)
-                            shouldContinue = true
-                        } else {
-                            // Quiet 5-second window: advance cleanly by 5s so silent stream gaps never stall replay!
-                            val cursorMillis = chatResult.cursor?.toLongOrNull()?.let { it / 1000L } ?: 0L
-                            val advancedMs = maxOf(nextFetchMs + 5_000L, cursorMillis)
-                            nextFetchMs = advancedMs
-                            bufferedUntilEpochMs = maxOf(bufferedUntilEpochMs, advancedMs)
-                            shouldContinue = true
                         }
-                    }.onFailure { err ->
-                        Log.w(TAG, "VOD chat lookahead fetch failed: ${err.message}")
-                        shouldContinue = false
+
+                        val bucketEndMs = bStart + 5_000L
+                        nextBucketMs = bucketEndMs
+                        bufferedUntilEpochMs = maxOf(bufferedUntilEpochMs, bucketEndMs)
                     }
 
-                    if (!shouldContinue) break
-                    delay(120L)
+                    if (hitFailure) break
+                    delay(90L)
                 }
             } catch (ce: CancellationException) {
                 throw ce

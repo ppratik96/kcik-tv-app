@@ -695,6 +695,17 @@ interface ChannelApiService {
         @Query("cursor") cursorMicroseconds: String
     ): Response<dev.xacnio.kciktv.shared.data.model.ChatHistoryResponse>
 
+    /**
+     * Returns 5-second chat message bucket starting at ISO8601 timestamp
+     * GET https://kick.com/api/v2/channels/{channelId}/messages?start_time=2026-11-10T19:13:40.000Z
+     */
+    @Headers("Accept: application/json")
+    @GET("api/v2/channels/{channelId}/messages")
+    suspend fun getChannelMessagesFromTime(
+        @Path("channelId") channelId: Long,
+        @Query("start_time") startTime: String
+    ): Response<dev.xacnio.kciktv.shared.data.model.ChatHistoryResponse>
+
     @Headers("Accept: application/json")
     @GET("api/v1/video/{id}")
     suspend fun getVideo(

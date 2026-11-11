@@ -14,7 +14,18 @@
     <string name="tv_quick_back_to_live" translatable="false">Live</string>
     <string name="tv_drawer_zee_latest_vod" translatable="false">Zee — Latest VOD</string>
     <string name="tv_drawer_channel_vods" translatable="false">Channel VODs</string>
-    <string name="tv_vod_controls_hint" translatable="false">◀ / ▶ Seek   •   OK Play/Pause   •   ▲ Chat   •   ▼ Menu</string>
+    <string name="tv_vod_controls_hint" translatable="false">OK Play/Pause   •   ◀ ▶ Rewind/Fwd   •   ▼ Options   •   Back Channels</string>
+    <string name="tv_hud_rewind_10" translatable="false">-10s</string>
+    <string name="tv_hud_forward_10" translatable="false">+10s</string>
+    <string name="tv_hud_pause" translatable="false">Pause</string>
+    <string name="tv_hud_play" translatable="false">Play</string>
+    <string name="tv_hud_chat_on" translatable="false">Chat: On</string>
+    <string name="tv_hud_chat_off" translatable="false">Chat: Off</string>
+    <string name="tv_hud_go_live" translatable="false">Go Live</string>
+    <string name="tv_hud_speed_default" translatable="false">1.0x Speed</string>
+    <string name="tv_hud_quality" translatable="false">Quality</string>
+    <string name="tv_hud_live_pill" translatable="false">● LIVE</string>
+    <string name="tv_offline_tap_vods" translatable="false">Offline • Select for VODs</string>
 
     <!-- Player Stats -->
     <string name="stat_fps">FPS</string>

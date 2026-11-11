@@ -1261,7 +1261,14 @@ class ChannelRepository {
      */
     suspend fun getChatHistoryForVod(channelId: Long, startTime: String): Result<ChatHistoryResult> = withContext(Dispatchers.IO) {
         try {
-            val response = liveStreamsService.getChatHistory(channelId, startTime = startTime)
+            var response = try {
+                channelService.getChannelMessagesFromTime(channelId, startTime)
+            } catch (_: Exception) {
+                null
+            }
+            if (response == null || !response.isSuccessful || response.body() == null) {
+                response = liveStreamsService.getChatHistory(channelId, startTime = startTime)
+            }
             if (response.isSuccessful && response.body() != null) {
                 val body = response.body()!!
                 val historyData = body.data

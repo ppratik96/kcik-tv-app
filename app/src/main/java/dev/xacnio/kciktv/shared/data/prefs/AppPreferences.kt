@@ -172,7 +172,7 @@ class AppPreferences(private val context: Context) {
         set(value) = prefs.edit().putInt("auto_refresh_interval", value).apply()
 
     var lastListMode: String
-        get() = prefs.getString("last_list_mode", "GLOBAL") ?: "GLOBAL"
+        get() = prefs.getString("last_list_mode", "FOLLOWING") ?: "FOLLOWING"
         set(value) = prefs.edit().putString("last_list_mode", value).apply()
 
     var zapDelay: Int
@@ -912,14 +912,24 @@ class AppPreferences(private val context: Context) {
 
     // ==================== TV Chat Overlay & VOD Preferences ====================
 
+    /** Persisted Chat On/Off visibility state on TV. */
+    var tvChatVisible: Boolean
+        get() = prefs.getBoolean("tv_chat_visible", true)
+        set(value) = prefs.edit().putBoolean("tv_chat_visible", value).apply()
+
     /** When true (default), TV chat floats on top of fullscreen 16:9 video instead of shrinking it. */
     var tvChatOverlayMode: Boolean
         get() = prefs.getBoolean("tv_chat_overlay_mode", true)
         set(value) = prefs.edit().putBoolean("tv_chat_overlay_mode", value).apply()
 
+    /** Horizontal edge for TV floating chat overlay ("right" or "left"). */
+    var tvChatOverlaySide: String
+        get() = prefs.getString("tv_chat_overlay_side", "right") ?: "right"
+        set(value) = prefs.edit().putString("tv_chat_overlay_side", value).apply()
+
     /** Background opacity percentage for TV chat overlay (0 = pure floating shadowed text, 35 = dark glass). */
     var tvChatOverlayOpacity: Int
-        get() = prefs.getInt("tv_chat_overlay_opacity", 35)
+        get() = prefs.getInt("tv_chat_overlay_opacity", 0)
         set(value) = prefs.edit().putInt("tv_chat_overlay_opacity", value.coerceIn(0, 90)).apply()
 
     /** When true, TV chat overlay occupies the bottom-right 58% corner instead of full screen height. */
