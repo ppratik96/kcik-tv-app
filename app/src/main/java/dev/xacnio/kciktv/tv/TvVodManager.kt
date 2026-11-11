@@ -388,7 +388,7 @@ class TvVodManager(
                     if (gen != syncGeneration.get() || !isVodMode) return@withContext
                     activity.chatAdapter?.apply {
                         isVodMode = true
-                        setVodStartTimeMillis(vodStartTimeMillis)
+                        setVodStartTimeMillis(this@TvVodManager.vodStartTimeMillis)
                         setShowTimestamps(activity.prefs.tvVodShowOffsetTimestamps)
                         clearMessages()
                     }

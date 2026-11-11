@@ -229,8 +229,8 @@ class ChatAdapter(
     }
     var isLoggedIn: Boolean = false
     var isVodMode: Boolean = false // New flag for VOD
-    var vodStartTimeMillis: Long = 0L // Base epoch ms for relative VOD timestamps
-    var overlayShadowEnabled: Boolean = false // Crisp black text drop-shadow for translucent TV overlays
+    private var vodStartTimeMillis: Long = 0L // Base epoch ms for relative VOD timestamps
+    private var overlayShadowEnabled: Boolean = false // Crisp black text drop-shadow for translucent TV overlays
     var isAutoScrollEnabled: Boolean = true // When false, don't trim old messages
     private var themeColor: Int = 0xFF53FC18.toInt()
     private var subscriberBadges: Map<Int, String> = emptyMap() // months -> badge URL
