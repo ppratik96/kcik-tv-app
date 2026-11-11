@@ -18,7 +18,7 @@ permissions:
 jobs:
   build:
     name: Build Signed KickTV APK
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout Code
@@ -53,7 +53,17 @@ jobs:
           fi
 
       - name: Build Signed Release APK
-        run: gradle assembleRelease --stacktrace
+        shell: bash
+        run: |
+          set +e
+          gradle assembleRelease --stacktrace 2>&1 | tee gradle-build.log
+          BUILD_EXIT=${PIPESTATUS[0]}
+          if [ "$BUILD_EXIT" -ne 0 ]; then
+            grep -E '(^e: |FAILURE:|What went wrong|^> |Exception:|Error:)' gradle-build.log | head -n 30 | while IFS= read -r line; do
+              echo "::error title=GradleBuild::${line}"
+            done
+            exit "$BUILD_EXIT"
+          fi
 
       - name: Extract Version & Prepare Release Assets
         id: version
@@ -69,8 +79,9 @@ jobs:
           echo "Located built APK: $APK_SRC"
           test -f "$APK_SRC"
 
-          LATEST_BT=$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -n 1)
-          "$ANDROID_HOME/build-tools/$LATEST_BT/apksigner" verify --print-certs "$APK_SRC"
+          SDK_DIR="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          LATEST_BT=$(ls "$SDK_DIR/build-tools" | sort -V | tail -n 1)
+          "$SDK_DIR/build-tools/$LATEST_BT/apksigner" verify --print-certs "$APK_SRC"
 
           cp -f "$APK_SRC" "app/build/outputs/apk/release/KickTV.apk"
           cp -f "$APK_SRC" "app/build/outputs/apk/release/KickTV-${VERSION}.apk"

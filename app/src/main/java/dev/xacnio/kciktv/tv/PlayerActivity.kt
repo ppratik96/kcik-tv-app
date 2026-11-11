@@ -1566,7 +1566,7 @@ class PlayerActivity : FragmentActivity() {
         
         if (sidebarVisible) {
             currentState = MenuState.SIDEBAR
-            isChannelMenu = true
+            isChannelMenu = sidebarContext == "channels"
             binding.sidebarRecyclerView.requestFocus()
         } else {
             currentState = MenuState.NONE
@@ -5529,7 +5529,9 @@ class PlayerActivity : FragmentActivity() {
                     thumbnailUrl = null,
                     profilePicUrl = null,
                     playbackUrl = null,
-                    categoryName = null
+                    categoryName = null,
+                    categorySlug = null,
+                    language = null
                 )
             }
 

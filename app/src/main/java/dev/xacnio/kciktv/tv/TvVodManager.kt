@@ -297,8 +297,9 @@ class TvVodManager(
                 var resolvedSource = video.source
                 var resolvedVideo = video
 
-                if (resolvedSource.isNullOrBlank() && !video.uuid.isNullOrBlank()) {
-                    repository.getVideo(video.uuid).onSuccess { fullVideo ->
+                val videoUuid = video.uuid
+                if (resolvedSource.isNullOrBlank() && !videoUuid.isNullOrBlank()) {
+                    repository.getVideo(videoUuid).onSuccess { fullVideo ->
                         resolvedVideo = fullVideo
                         resolvedSource = fullVideo.source
                     }
